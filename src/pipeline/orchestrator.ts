@@ -75,6 +75,7 @@ export async function processPullRequest(context: PRContext): Promise<void> {
     }
   }
 
+  console.log('AI review approved - proceeding with Claude analysis');
   const review = await generateReview(filteredFiles, preChecks);
   const comment = formatReview(review, filterResult);
 

@@ -1,108 +1,127 @@
-import { DiffFile, PreCheckResult, ReviewOutput, RiskSignal } from '../types.js';
+import { DiffFile, PreCheckResult, ReviewOutput } from '../types.js';
+import { analyzeRiskSignals } from './risk-analyzer.js';
+import { createClaudeClient } from './claude-client.js';
+import { buildSystemPrompt, buildUserPrompt } from './prompts/review-prompt.js';
+import { AIReviewInput, AIReviewOutput, AIResponseValidationError, AIValidationError } from './ai-types.js';
 
-function extractRisksFromSignal(category: string, signal: RiskSignal): string[] {
-  if (!signal.detected) return [];
-
-  const risks: string[] = [];
-  const prefix = signal.confidence === 'high' ? '🔴' : signal.confidence === 'medium' ? '🟡' : '🟢';
-
-  const categoryDescriptions: Record<string, string> = {
-    publicAPI: 'Public API changes detected - breaking changes possible',
-    stateMutation: 'State mutation patterns detected - race conditions possible',
-    authentication: 'Authentication logic modified - security review required',
-    persistence: 'Database operations detected - migration safety unclear',
-    concurrency: 'Concurrency primitives detected - deadlock/race risk',
-    errorHandling: 'Error handling gaps detected - silent failures possible',
-    networking: 'Network operations added - timeout/retry logic unclear',
-    dependencies: 'New dependencies added - supply chain risk',
-    criticalPath: 'Critical path modified - failure impact high',
-    securityBoundaries: 'Security boundaries modified - validation unclear',
-  };
-
-  const description = categoryDescriptions[category] || `${category} changes detected`;
-  risks.push(`${prefix} ${description}`);
-
-  if (signal.locations.length > 0) {
-    risks.push(`   Files: ${signal.locations.slice(0, 3).join(', ')}`);
-  }
-
-  return risks;
-}
-
-function extractAssumptions(preChecks: PreCheckResult): string[] {
-  const assumptions: string[] = [];
-
-  if (preChecks.publicAPI.detected) {
-    assumptions.push('API consumers can handle contract changes');
-  }
-
-  if (preChecks.authentication.detected) {
-    assumptions.push('Authentication changes are backward compatible');
-  }
-
-  if (preChecks.persistence.detected) {
-    assumptions.push('Database schema changes have migration path');
-  }
-
-  if (preChecks.concurrency.detected) {
-    assumptions.push('Concurrent operations are properly synchronized');
-  }
-
-  if (preChecks.networking.detected) {
-    assumptions.push('Network failures are handled gracefully');
-  }
-
-  if (preChecks.errorHandling.detected && preChecks.errorHandling.confidence === 'high') {
-    assumptions.push('Empty catch blocks are intentional');
-  }
-
-  return assumptions;
-}
-
-function determineVerdict(preChecks: PreCheckResult): ReviewOutput['verdict'] {
-  const entries = Object.entries(preChecks) as [string, RiskSignal][];
+function validateAIResponse(response: unknown): AIReviewOutput {
+  const errors: AIValidationError[] = [];
   
-  const highRiskCount = entries.filter(([_, s]) => s.detected && s.confidence === 'high').length;
-  const mediumRiskCount = entries.filter(([_, s]) => s.detected && s.confidence === 'medium').length;
-
-  if (highRiskCount >= 3) {
-    return 'high_risk';
+  if (typeof response !== 'object' || response === null) {
+    throw new AIResponseValidationError([{ field: 'root', reason: 'Response is not an object' }]);
   }
-
-  if (highRiskCount >= 1 || mediumRiskCount >= 3) {
-    return 'requires_changes';
+  
+  const r = response as Record<string, unknown>;
+  
+  if (typeof r.assessment !== 'string') {
+    errors.push({ field: 'assessment', reason: 'Must be a string' });
   }
-
-  if (mediumRiskCount >= 1) {
-    return 'safe_with_conditions';
+  
+  if (!Array.isArray(r.risks)) {
+    errors.push({ field: 'risks', reason: 'Must be an array' });
   }
+  
+  if (!Array.isArray(r.assumptions)) {
+    errors.push({ field: 'assumptions', reason: 'Must be an array' });
+  }
+  
+  if (!Array.isArray(r.tradeoffs)) {
+    errors.push({ field: 'tradeoffs', reason: 'Must be an array' });
+  }
+  
+  if (!Array.isArray(r.failureModes)) {
+    errors.push({ field: 'failureModes', reason: 'Must be an array' });
+  }
+  
+  if (!Array.isArray(r.recommendations)) {
+    errors.push({ field: 'recommendations', reason: 'Must be an array' });
+  }
+  
+  const validVerdicts = ['safe', 'safe_with_conditions', 'requires_changes', 'high_risk'];
+  if (!validVerdicts.includes(r.verdict as string)) {
+    errors.push({ field: 'verdict', reason: `Must be one of: ${validVerdicts.join(', ')}` });
+  }
+  
+  if (errors.length > 0) {
+    throw new AIResponseValidationError(errors);
+  }
+  
+  return r as AIReviewOutput;
+}
 
-  return 'safe';
+function createFallbackReview(preChecks: PreCheckResult, fileCount: number): ReviewOutput {
+  const riskAnalysis = analyzeRiskSignals(preChecks);
+  
+  return {
+    assessment: `AI review unavailable. Analyzed ${fileCount} files with ${riskAnalysis.highConfidenceSignals} high-confidence risk signals detected.`,
+    risks: riskAnalysis.criticalCategories.map(cat => `${cat} modifications detected - manual review recommended`),
+    assumptions: ['AI analysis could not be completed - relying on deterministic pre-checks only'],
+    tradeoffs: [],
+    failureModes: [],
+    recommendations: ['Manual review required - AI service unavailable'],
+    verdict: riskAnalysis.highConfidenceSignals >= 3 ? 'high_risk' : 
+             riskAnalysis.highConfidenceSignals >= 1 ? 'requires_changes' : 
+             'safe_with_conditions',
+  };
 }
 
 export async function generateReview(
   files: DiffFile[],
   preChecks: PreCheckResult
 ): Promise<ReviewOutput> {
-  const risks: string[] = [];
-  const entries = Object.entries(preChecks) as [string, RiskSignal][];
-
-  for (const [category, signal] of entries) {
-    risks.push(...extractRisksFromSignal(category, signal));
-  }
-
-  const assumptions = extractAssumptions(preChecks);
-  const verdict = determineVerdict(preChecks);
-
-  const totalDetected = entries.filter(([_, s]) => s.detected).length;
-
-  return {
-    assessment: `Analyzed ${files.length} files, detected ${totalDetected} risk categories`,
-    risks,
-    assumptions,
-    tradeoffs: [],
-    failureModes: [],
-    recommendations: risks.length > 0 ? ['Manual security review recommended'] : [],
-    verdict,
+  const riskAnalysis = analyzeRiskSignals(preChecks);
+  
+  const input: AIReviewInput = {
+    fileCount: files.length,
+    totalChanges: files.reduce((sum, f) => sum + f.changes, 0),
+    riskSignals: preChecks,
+    criticalCategories: riskAnalysis.criticalCategories,
+    highConfidenceCount: riskAnalysis.highConfidenceSignals,
+    mediumConfidenceCount: riskAnalysis.mediumConfidenceSignals,
   };
+  
+  try {
+    const client = createClaudeClient();
+    const systemPrompt = buildSystemPrompt();
+    const userPrompt = buildUserPrompt(input);
+    
+    console.log('Calling Claude API...');
+    const response = await client.generateReview(systemPrompt, userPrompt);
+    
+    if (response.usage) {
+      console.log('Claude API usage:', {
+        input_tokens: response.usage.input_tokens,
+        output_tokens: response.usage.output_tokens,
+      });
+    }
+    
+    const textContent = response.content.find(c => c.type === 'text');
+    if (!textContent || !textContent.text) {
+      throw new Error('No text content in Claude response');
+    }
+    
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(textContent.text);
+    } catch (parseError) {
+      console.error('Failed to parse Claude response as JSON:', textContent.text);
+      throw new Error('Claude returned invalid JSON');
+    }
+    
+    const validated = validateAIResponse(parsed);
+    
+    return {
+      assessment: validated.assessment,
+      risks: validated.risks,
+      assumptions: validated.assumptions,
+      tradeoffs: validated.tradeoffs,
+      failureModes: validated.failureModes,
+      recommendations: validated.recommendations,
+      verdict: validated.verdict,
+    };
+    
+  } catch (error) {
+    console.error('AI review failed, using fallback:', error);
+    return createFallbackReview(preChecks, files.length);
+  }
 }

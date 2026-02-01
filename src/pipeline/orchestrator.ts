@@ -7,28 +7,61 @@ import { analyzeRiskSignals, formatRiskSummary } from '../analysis/risk-analyzer
 import { generateReview } from '../analysis/ai.js';
 import { formatReview } from '../output/formatter.js';
 import { publishReview } from '../output/publisher.js';
+import { logger } from '../observability/logger.js';
+import { 
+  createDecisionTrace, 
+  recordPreCheckResults, 
+  recordAIGatingDecision,
+  recordPipelinePath,
+  recordFinalVerdict,
+  recordCommentPosted,
+  type DecisionTrace 
+} from '../analysis/decision-trace.js';
 
-export async function processPullRequest(context: PRContext): Promise<void> {
-  console.log(`Processing PR #${context.pull_number} in ${context.owner}/${context.repo}`);
+export async function processPullRequest(context: PRContext, reviewId: string): Promise<void> {
+  const trace = createDecisionTrace(reviewId);
+  
+  logger.info('pipeline_start', 'Processing pull request', {
+    owner: context.owner,
+    repo: context.repo,
+    pullNumber: context.pull_number,
+  });
 
   const octokit = await createInstallationClient(context.installation_id);
 
   let files;
   try {
     files = await extractDiff(octokit, context);
+    logger.info('diff_extraction', 'Diff extracted successfully', {
+      fileCount: files.length,
+      totalChanges: files.reduce((sum, f) => sum + f.changes, 0),
+    });
   } catch (error) {
-    console.error('Diff extraction failed:', error);
+    logger.error('diff_extraction', 'Diff extraction failed', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+    
+    recordPipelinePath(trace, 'error_diff_extraction');
+    recordCommentPosted(trace, true);
+    
     await publishReview(
       octokit,
       context,
       '## MergeSense Review\n\n⚠️ Unable to analyze: PR too large or diff unavailable'
     );
+    
+    logger.info('pipeline_complete', 'Pipeline finished with error', { trace });
     return;
   }
 
   const filterResult = filterDiff(files);
   if (!filterResult.passed) {
-    console.log(`Skipping PR: ${filterResult.reason}`);
+    logger.info('file_filtering', 'PR skipped after filtering', {
+      reason: filterResult.reason,
+      filesIgnored: filterResult.filesIgnored,
+    });
+    recordPipelinePath(trace, 'silent_exit_filtered');
+    logger.info('pipeline_complete', 'Pipeline finished (silent exit - filtered)', { trace });
     return;
   }
 
@@ -39,7 +72,15 @@ export async function processPullRequest(context: PRContext): Promise<void> {
   const preChecks = runPreChecks(filteredFiles);
   const riskAnalysis = analyzeRiskSignals(preChecks);
   
-  console.log('Pre-checks completed:', {
+  recordPreCheckResults(
+    trace,
+    riskAnalysis.highConfidenceSignals,
+    riskAnalysis.mediumConfidenceSignals,
+    riskAnalysis.lowConfidenceSignals,
+    riskAnalysis.criticalCategories
+  );
+  
+  logger.info('prechecks_complete', 'Pre-checks completed', {
     totalSignals: riskAnalysis.totalSignals,
     highConfidence: riskAnalysis.highConfidenceSignals,
     mediumConfidence: riskAnalysis.mediumConfidenceSignals,
@@ -49,14 +90,22 @@ export async function processPullRequest(context: PRContext): Promise<void> {
   const aiDecision = shouldBlockAI(preChecks);
   
   if (aiDecision.block) {
-    console.log(`AI blocked: ${aiDecision.reason}`);
+    recordAIGatingDecision(trace, false, aiDecision.reason!);
+    logger.info('ai_gating', 'AI blocked', {
+      reason: aiDecision.reason,
+      highRiskSignals: riskAnalysis.highConfidenceSignals,
+    });
     
     if (riskAnalysis.safeToSkipAI) {
-      console.log('No significant risks detected - skipping review comment');
+      recordPipelinePath(trace, 'silent_exit_safe');
+      logger.info('pipeline_complete', 'Pipeline finished (silent exit - safe)', { trace });
       return;
     }
 
     if (riskAnalysis.requiresManualReview) {
+      recordPipelinePath(trace, 'manual_review_warning');
+      recordCommentPosted(trace, true);
+      
       const manualReviewComment = [
         '## MergeSense Review',
         '',
@@ -70,15 +119,34 @@ export async function processPullRequest(context: PRContext): Promise<void> {
       ].join('\n');
       
       await publishReview(octokit, context, manualReviewComment);
-      console.log('Manual review recommendation posted');
+      logger.info('pipeline_complete', 'Pipeline finished (manual review warning)', { trace });
       return;
     }
   }
 
-  console.log('AI review approved - proceeding with Claude analysis');
-  const review = await generateReview(filteredFiles, preChecks);
+  recordAIGatingDecision(trace, true, 'Risk signals within acceptable range for AI review');
+  logger.info('ai_gating', 'AI review approved', {
+    highRiskSignals: riskAnalysis.highConfidenceSignals,
+    mediumRiskSignals: riskAnalysis.mediumConfidenceSignals,
+  });
+
+  const review = await generateReview(filteredFiles, preChecks, trace);
+  recordFinalVerdict(trace, review.verdict);
+  
+  if (trace.fallbackUsed) {
+    recordPipelinePath(trace, trace.fallbackReason?.trigger === 'quality_rejection' ? 'ai_fallback_quality' : 'ai_fallback_error');
+  } else {
+    recordPipelinePath(trace, 'ai_review');
+  }
+  
   const comment = formatReview(review, filterResult);
 
   await publishReview(octokit, context, comment);
-  console.log(`Review posted for PR #${context.pull_number}`);
+  recordCommentPosted(trace, true);
+  
+  logger.info('pipeline_complete', 'Pipeline finished successfully', {
+    trace,
+    verdict: review.verdict,
+    fallbackUsed: trace.fallbackUsed,
+  });
 }

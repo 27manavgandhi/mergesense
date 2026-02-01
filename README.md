@@ -51,45 +51,190 @@ Review Generated (AI or fallback)
 Single Comment Posted to PR
 ```
 
-## Day 6: Real Claude AI Integration
+## Day 7: Observability & Quality Hardening
 
 ### What Changed
 
-**Before (Day 5):**
-- AI layer was a placeholder
-- Generated review from pre-check flags only
-- No actual AI calls
+**Before (Day 6):**
+- Console.log statements with no structure
+- No way to trace a PR review end-to-end
+- AI decisions not explained after the fact
+- Low-quality AI output could reach GitHub
+- No audit trail for incidents
 
-**After (Day 6):**
-- Real Claude API integration (Sonnet 4)
+**After (Day 7):**
+- Structured JSON logging throughout pipeline
+- Every PR review has unique `reviewId` for tracing
+- Decision trace records why AI was allowed/blocked
+- Review quality validation rejects boilerplate output
+- Complete audit trail for post-incident analysis
+
+### Observability Features
+
+#### Structured Logging
+
+All logs are JSON-formatted with consistent schema:
+```json
+{
+  "timestamp": "2026-02-01T15:30:45.123Z",
+  "level": "info",
+  "reviewId": "a3f9c2d8e1b4",
+  "phase": "ai_gating",
+  "message": "AI review approved",
+  "data": {
+    "highRiskSignals": 2,
+    "mediumRiskSignals": 1
+  },
+  "owner": "acme",
+  "repo": "api-server",
+  "pullNumber": 42
+}
+```
+
+**Log Phases:**
+- `pipeline_start` - PR processing begins
+- `diff_extraction` - Diff fetched from GitHub
+- `file_filtering` - Files ignored/analyzed
+- `prechecks_complete` - Risk detection results
+- `ai_gating` - AI approval decision
+- `ai_invocation` - Claude API called
+- `ai_response` - Claude response received
+- `ai_validation` - Response validation
+- `review_quality` - Quality check result
+- `ai_review` - AI review accepted
+- `ai_error` - AI failure
+- `pipeline_complete` - Final trace logged
+
+#### Decision Trace
+
+Every PR review generates a decision trace that records:
+```typescript
+{
+  reviewId: string;
+  pipelinePath: 'silent_exit_safe' | 'ai_review' | 'manual_review_warning' | ...;
+  aiGating: {
+    allowed: boolean;
+    reason: string;
+    highRiskSignals: number;
+    criticalCategories: string[];
+  };
+  preCheckSummary: {
+    totalSignalsDetected: number;
+    highConfidence: number;
+    mediumConfidence: number;
+  };
+  aiInvoked: boolean;
+  fallbackUsed: boolean;
+  fallbackReason?: {
+    trigger: 'api_error' | 'quality_rejection' | 'validation_error';
+    details: string;
+  };
+  finalVerdict?: 'safe' | 'requires_changes' | ...;
+  commentPosted: boolean;
+}
+```
+
+**Logged at:** `pipeline_complete` phase
+
+**Use cases:**
+- Post-incident investigation: "Why didn't we review this PR?"
+- Cost analysis: "How often is AI actually invoked?"
+- Quality monitoring: "How often is AI output rejected?"
+- Debugging: "What risk signals triggered manual review?"
+
+#### Review Quality Validation
+
+AI output is validated before posting to GitHub.
+
+**Quality checks:**
+1. **Boilerplate detection** - Rejects phrases like "looks good", "LGTM", "no issues"
+2. **Minimum length** - Assessment must be >20 characters
+3. **Minimum detail** - At least 1 item across risks/assumptions/recommendations
+4. **Verdict consistency** - "safe" verdict cannot have risks; "high_risk" must have risks
+
+**If quality check fails:**
+- AI output discarded
+- Fallback review generated from pre-checks
+- Reason logged in decision trace
+- Comment still posted (deterministic review)
+
+**This prevents:**
+- Generic "looks fine" AI reviews
+- Low-signal output consuming user attention
+- Silent quality degradation over time
+
+### Determinism Guarantees
+
+MergeSense has three layers of determinism:
+
+#### Layer 1: Fully Deterministic (No AI)
+
+**What:**
+- File filtering (lock files, generated code)
+- Pattern-based risk detection (regex matching)
+- Risk signal confidence scoring
+- AI gating decision logic
+
+**Guarantee:**
+Same diff → Same pre-check results → Same AI gating decision
+
+**Why it matters:**
+- Reproducible reviews
+- Testable behavior
+- No AI cost for trivial PRs
+
+#### Layer 2: Constrained Nondeterminism (AI with Controls)
+
+**What:**
+- Claude API invocation (temperature=0 but not fully deterministic)
+- Review generation
+
+**Controls:**
 - Structured JSON output enforced
-- Defensive response validation
-- Fallback to deterministic review if AI fails
-- Token usage logging
+- System prompt defines role/constraints
+- Quality validation post-processing
+- Fallback if output is low-quality
 
-### AI Safeguards
+**Why it matters:**
+- AI provides judgment, not randomness
+- Output variability is bounded
+- Quality floor is guaranteed
 
-AI is **only** invoked when:
-1. Deterministic pre-checks detect 1-5 high-confidence risk signals
-2. Risk analyzer approves AI usage
-3. PR is not trivially safe (0 high signals)
-4. PR is not extremely risky (6+ high signals)
+#### Layer 3: Nondeterministic Fallback (Acceptable)
 
-AI **never** runs for:
-- Safe PRs with no significant risks
-- Extremely risky PRs requiring manual review
-- PRs that fail deterministic filters
+**What:**
+- AI unavailable (timeout, rate limit, API error)
+- AI output rejected (quality check failed)
 
-### What Happens If AI Fails
+**Behavior:**
+- Deterministic fallback review generated
+- Based purely on pre-check results
+- Always produces valid output
 
-If Claude API fails (timeout, rate limit, malformed response):
-1. Error is logged
-2. Fallback review generated from deterministic pre-checks
-3. PR comment posted with caveat: "AI review unavailable"
-4. Verdict determined by pre-check confidence levels
-5. System remains operational
+**Why it matters:**
+- System never fails silently
+- PRs always get reviewed (AI or deterministic)
+- Degraded service is explicit, not hidden
 
-**MergeSense never fails silently. Failures are explicit.**
+### Why Temperature=0 Is Not Enough
+
+**Common misconception:**
+> "If temperature=0, the output is deterministic."
+
+**Reality:**
+- Temperature=0 reduces randomness but does not eliminate it
+- Token sampling still has inherent nondeterminism
+- Network/API variability affects responses
+- Same prompt can yield slightly different outputs
+
+**MergeSense approach:**
+1. Use temperature=0 (reduces variability)
+2. Enforce structured JSON output (constrains format)
+3. Validate quality post-hoc (reject low-signal output)
+4. Always have deterministic fallback (fail-safe)
+
+**Result:**
+Bounded nondeterminism with guaranteed quality floor.
 
 ## Risk Detection (Deterministic Pre-Checks)
 
@@ -228,8 +373,62 @@ Server starts on port 3000, webhook ready at `/webhook`.
 | Claude API timeout | Fallback review generated from pre-checks |
 | Claude returns malformed JSON | Fallback review generated from pre-checks |
 | Claude API rate limit | Fallback review generated from pre-checks |
+| AI review fails quality check | Fallback review generated from pre-checks |
 
 **MergeSense fails safely. No silent failures. No garbage output.**
+
+## Debugging & Monitoring
+
+### Tracing a PR Review
+
+Every webhook includes a unique `reviewId` in the response:
+```bash
+curl -X POST https://your-domain.com/webhook \
+  -H "X-GitHub-Event: pull_request" \
+  -d '...'
+  
+# Response:
+{
+  "message": "Processing",
+  "reviewId": "a3f9c2d8e1b4"
+}
+```
+
+**Search logs by reviewId:**
+```bash
+cat logs.json | jq 'select(.reviewId == "a3f9c2d8e1b4")'
+```
+
+**Trace shows:**
+- Diff extraction result
+- Pre-check risk signals
+- AI gating decision
+- AI invocation (if applicable)
+- Quality validation result
+- Final verdict
+- Comment posting confirmation
+
+### Common Log Queries
+
+**Find all AI fallbacks:**
+```bash
+cat logs.json | jq 'select(.phase == "ai_error")'
+```
+
+**Count reviews by pipeline path:**
+```bash
+cat logs.json | jq 'select(.phase == "pipeline_complete") | .data.trace.pipelinePath' | sort | uniq -c
+```
+
+**Find quality rejections:**
+```bash
+cat logs.json | jq 'select(.phase == "review_quality" and .level == "warn")'
+```
+
+**Token usage analysis:**
+```bash
+cat logs.json | jq 'select(.phase == "ai_response") | .data.input_tokens, .data.output_tokens'
+```
 
 ## Design Constraints
 
@@ -264,10 +463,12 @@ Server starts on port 3000, webhook ready at `/webhook`.
 ```
 src/
 ├── analysis/
-│   ├── ai.ts                    # AI integration with fallback
+│   ├── ai.ts                    # AI integration with quality validation
 │   ├── ai-types.ts              # AI input/output types
 │   ├── claude-client.ts         # Claude API client
+│   ├── decision-trace.ts        # Decision recording
 │   ├── prechecks.ts             # Deterministic risk detection
+│   ├── review-quality.ts        # AI output validation
 │   ├── risk-analyzer.ts         # Signal analysis
 │   └── prompts/
 │       └── review-prompt.ts     # AI prompt template
@@ -277,14 +478,16 @@ src/
 │   └── deterministic.ts         # File ignore patterns
 ├── github/
 │   └── client.ts                # Installation token generation
+├── observability/
+│   └── logger.ts                # Structured logging
 ├── output/
 │   ├── formatter.ts             # Review Markdown generation
 │   └── publisher.ts             # GitHub comment API
 ├── pipeline/
-│   └── orchestrator.ts          # Main processing flow
+│   └── orchestrator.ts          # Main processing flow with tracing
 ├── webhook/
 │   └── handler.ts               # Webhook verification & routing
-├── index.ts                     # Server entry point
+├── index.ts                     # Server entry point with logging context
 └── types.ts                     # Core TypeScript interfaces
 ```
 
@@ -293,6 +496,7 @@ src/
 - **Day 4**: Core pipeline (webhook → diff → filter → comment)
 - **Day 5**: Enhanced deterministic pre-checks (10 categories, confidence scoring)
 - **Day 6**: Real Claude AI integration (controlled judgment, fallback safety)
+- **Day 7**: Observability & quality hardening (structured logging, decision trace, quality validation)
 
 ## Philosophy
 
@@ -304,6 +508,7 @@ It focuses on:
 - Trade-offs over rules
 - Silence over noise
 - Restraint as seniority
+- Explainability as accountability
 
 Every line of code in MergeSense is written as if a Principal Engineer will be held accountable for it in production.
 
@@ -316,7 +521,7 @@ MergeSense intentionally does **not**:
 - Act as a linter
 - Support inline comments
 - Provide configuration UI
-- Track metrics (Day 6)
+- Persist data to databases
 - Support multiple repos per installation (yet)
 
 Simplicity and correctness matter more than features.
@@ -330,6 +535,8 @@ Contributions should:
 - Maintain fail-safe defaults
 - Avoid adding complexity
 - Be defensible in a design review
+- Include structured logging
+- Be traceable via decision trace
 
 ## License
 
@@ -342,3 +549,5 @@ Built to demonstrate that AI code review tools can be:
 - AI-assisted where necessary
 - Cost-conscious by design
 - Production-grade from day one
+- Auditable in production
+- Explainable after incidents

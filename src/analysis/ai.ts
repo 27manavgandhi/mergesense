@@ -3,6 +3,10 @@ import { analyzeRiskSignals } from './risk-analyzer.js';
 import { createClaudeClient } from './claude-client.js';
 import { buildSystemPrompt, buildUserPrompt } from './prompts/review-prompt.js';
 import { AIReviewInput, AIReviewOutput, AIResponseValidationError, AIValidationError } from './ai-types.js';
+import { validateReviewQuality } from './review-quality.js';
+import { logger } from '../observability/logger.js';
+import { recordFallback, recordAIInvocation } from './decision-trace.js';
+import type { DecisionTrace } from './decision-trace.js';
 
 function validateAIResponse(response: unknown): AIReviewOutput {
   const errors: AIValidationError[] = [];
@@ -67,7 +71,8 @@ function createFallbackReview(preChecks: PreCheckResult, fileCount: number): Rev
 
 export async function generateReview(
   files: DiffFile[],
-  preChecks: PreCheckResult
+  preChecks: PreCheckResult,
+  trace: DecisionTrace
 ): Promise<ReviewOutput> {
   const riskAnalysis = analyzeRiskSignals(preChecks);
   
@@ -85,13 +90,22 @@ export async function generateReview(
     const systemPrompt = buildSystemPrompt();
     const userPrompt = buildUserPrompt(input);
     
-    console.log('Calling Claude API...');
+    logger.info('ai_invocation', 'Calling Claude API', {
+      fileCount: input.fileCount,
+      totalChanges: input.totalChanges,
+      highRiskSignals: input.highConfidenceCount,
+      mediumRiskSignals: input.mediumConfidenceCount,
+    });
+    
+    recordAIInvocation(trace, true);
+    
     const response = await client.generateReview(systemPrompt, userPrompt);
     
     if (response.usage) {
-      console.log('Claude API usage:', {
+      logger.info('ai_response', 'Claude API response received', {
         input_tokens: response.usage.input_tokens,
         output_tokens: response.usage.output_tokens,
+        stop_reason: response.stop_reason,
       });
     }
     
@@ -104,11 +118,32 @@ export async function generateReview(
     try {
       parsed = JSON.parse(textContent.text);
     } catch (parseError) {
-      console.error('Failed to parse Claude response as JSON:', textContent.text);
+      logger.error('ai_validation', 'Failed to parse Claude response as JSON', {
+        error: parseError instanceof Error ? parseError.message : 'Unknown error',
+        responsePreview: textContent.text.slice(0, 200),
+      });
+      recordFallback(trace, 'validation_error', 'JSON parse failed');
       throw new Error('Claude returned invalid JSON');
     }
     
     const validated = validateAIResponse(parsed);
+    
+    const qualityCheck = validateReviewQuality(validated);
+    if (!qualityCheck.passed) {
+      logger.warn('review_quality', 'AI review rejected due to quality check', {
+        reason: qualityCheck.reason,
+        assessment: validated.assessment,
+        verdict: validated.verdict,
+      });
+      recordFallback(trace, 'quality_rejection', qualityCheck.reason!);
+      return createFallbackReview(preChecks, files.length);
+    }
+    
+    logger.info('ai_review', 'AI review accepted', {
+      verdict: validated.verdict,
+      riskCount: validated.risks.length,
+      assumptionCount: validated.assumptions.length,
+    });
     
     return {
       assessment: validated.assessment,
@@ -121,7 +156,15 @@ export async function generateReview(
     };
     
   } catch (error) {
-    console.error('AI review failed, using fallback:', error);
+    logger.error('ai_error', 'AI review failed, using fallback', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      errorType: error instanceof AIResponseValidationError ? 'validation' : 'api',
+    });
+    
+    if (!(error instanceof AIResponseValidationError)) {
+      recordFallback(trace, 'api_error', error instanceof Error ? error.message : 'Unknown error');
+    }
+    
     return createFallbackReview(preChecks, files.length);
   }
 }

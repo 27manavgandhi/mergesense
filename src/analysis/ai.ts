@@ -6,6 +6,8 @@ import { AIReviewInput, AIReviewOutput, AIResponseValidationError, AIValidationE
 import { validateReviewQuality } from './review-quality.js';
 import { logger } from '../observability/logger.js';
 import { recordFallback, recordAIInvocation } from './decision-trace.js';
+import { metrics } from '../metrics/metrics.js';
+import { calculateCost } from '../metrics/cost-model.js';
 import type { DecisionTrace } from './decision-trace.js';
 
 function validateAIResponse(response: unknown): AIReviewOutput {
@@ -98,14 +100,31 @@ export async function generateReview(
     });
     
     recordAIInvocation(trace, true);
+    metrics.recordAIInvocation();
     
     const response = await client.generateReview(systemPrompt, userPrompt);
     
     if (response.usage) {
+      const cost = calculateCost({
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+      });
+      
+      metrics.recordTokenUsage(
+        response.usage.input_tokens,
+        response.usage.output_tokens,
+        cost.totalCost
+      );
+      
       logger.info('ai_response', 'Claude API response received', {
         input_tokens: response.usage.input_tokens,
         output_tokens: response.usage.output_tokens,
         stop_reason: response.stop_reason,
+        cost_usd: cost.totalCost,
+        cost_breakdown: {
+          input: cost.inputCost,
+          output: cost.outputCost,
+        },
       });
     }
     
@@ -123,6 +142,7 @@ export async function generateReview(
         responsePreview: textContent.text.slice(0, 200),
       });
       recordFallback(trace, 'validation_error', 'JSON parse failed');
+      metrics.recordAIFallback('api_error');
       throw new Error('Claude returned invalid JSON');
     }
     
@@ -136,6 +156,7 @@ export async function generateReview(
         verdict: validated.verdict,
       });
       recordFallback(trace, 'quality_rejection', qualityCheck.reason!);
+      metrics.recordAIFallback('quality_rejection');
       return createFallbackReview(preChecks, files.length);
     }
     
@@ -163,6 +184,7 @@ export async function generateReview(
     
     if (!(error instanceof AIResponseValidationError)) {
       recordFallback(trace, 'api_error', error instanceof Error ? error.message : 'Unknown error');
+      metrics.recordAIFallback('api_error');
     }
     
     return createFallbackReview(preChecks, files.length);

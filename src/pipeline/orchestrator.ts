@@ -8,6 +8,7 @@ import { generateReview } from '../analysis/ai.js';
 import { formatReview } from '../output/formatter.js';
 import { publishReview } from '../output/publisher.js';
 import { logger } from '../observability/logger.js';
+import { metrics } from '../metrics/metrics.js';
 import { 
   createDecisionTrace, 
   recordPreCheckResults, 
@@ -20,6 +21,8 @@ import {
 
 export async function processPullRequest(context: PRContext, reviewId: string): Promise<void> {
   const trace = createDecisionTrace(reviewId);
+  
+  metrics.incrementPRProcessed();
   
   logger.info('pipeline_start', 'Processing pull request', {
     owner: context.owner,
@@ -42,6 +45,7 @@ export async function processPullRequest(context: PRContext, reviewId: string): 
     });
     
     recordPipelinePath(trace, 'error_diff_extraction');
+    metrics.recordPipelinePath('error_diff_extraction');
     recordCommentPosted(trace, true);
     
     await publishReview(
@@ -61,6 +65,7 @@ export async function processPullRequest(context: PRContext, reviewId: string): 
       filesIgnored: filterResult.filesIgnored,
     });
     recordPipelinePath(trace, 'silent_exit_filtered');
+    metrics.recordPipelinePath('silent_exit_filtered');
     logger.info('pipeline_complete', 'Pipeline finished (silent exit - filtered)', { trace });
     return;
   }
@@ -98,12 +103,14 @@ export async function processPullRequest(context: PRContext, reviewId: string): 
     
     if (riskAnalysis.safeToSkipAI) {
       recordPipelinePath(trace, 'silent_exit_safe');
+      metrics.recordPipelinePath('silent_exit_safe');
       logger.info('pipeline_complete', 'Pipeline finished (silent exit - safe)', { trace });
       return;
     }
 
     if (riskAnalysis.requiresManualReview) {
       recordPipelinePath(trace, 'manual_review_warning');
+      metrics.recordPipelinePath('manual_review_warning');
       recordCommentPosted(trace, true);
       
       const manualReviewComment = [
@@ -134,9 +141,12 @@ export async function processPullRequest(context: PRContext, reviewId: string): 
   recordFinalVerdict(trace, review.verdict);
   
   if (trace.fallbackUsed) {
-    recordPipelinePath(trace, trace.fallbackReason?.trigger === 'quality_rejection' ? 'ai_fallback_quality' : 'ai_fallback_error');
+    const path = trace.fallbackReason?.trigger === 'quality_rejection' ? 'ai_fallback_quality' : 'ai_fallback_error';
+    recordPipelinePath(trace, path);
+    metrics.recordPipelinePath(path);
   } else {
     recordPipelinePath(trace, 'ai_review');
+    metrics.recordPipelinePath('ai_review');
   }
   
   const comment = formatReview(review, filterResult);

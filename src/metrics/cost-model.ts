@@ -25,3 +25,10 @@ export function calculateCost(usage: TokenUsage): CostEstimate {
   };
 }
 
+export function getPricingModel() {
+  return {
+    model: 'claude-sonnet-4-20250514',
+    inputPerK: CLAUDE_SONNET_4_PRICING.INPUT_TOKENS_PER_1K,
+    outputPerK: CLAUDE_SONNET_4_PRICING.OUTPUT_TOKENS_PER_1K,
+  };
+}

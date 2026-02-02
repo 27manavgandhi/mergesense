@@ -137,7 +137,13 @@ class Metrics {
         errorDiffExtraction: this.counters.prsErrorDiffExtraction,
         errorSizeLimit: this.counters.prsErrorSizeLimit,
       },
-      
+      ai: {
+        invocationCount: this.counters.aiInvocationCount,
+        fallbackCount: this.counters.aiFallbackCount,
+        fallbackRate: parseFloat(fallbackRate.toFixed(4)),
+        qualityRejectionCount: this.counters.aiQualityRejectionCount,
+        apiErrorCount: this.counters.aiAPIErrorCount,
+      },
       tokens: {
         totalInput: this.counters.tokensInput,
         totalOutput: this.counters.tokensOutput,

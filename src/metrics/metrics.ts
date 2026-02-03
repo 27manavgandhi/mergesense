@@ -13,6 +13,8 @@ export interface MetricsSnapshot {
     aiFallbackQuality: number;
     errorDiffExtraction: number;
     errorSizeLimit: number;
+    loadShedPRSaturated: number;
+    loadShedAISaturated: number;
   };
   ai: {
     invocationCount: number;
@@ -31,6 +33,20 @@ export interface MetricsSnapshot {
     averagePerAIInvocation: number;
     averagePerPR: number;
   };
+  concurrency: {
+    prPipelines: {
+      inFlight: number;
+      peak: number;
+      available: number;
+      waiting: number;
+    };
+    aiCalls: {
+      inFlight: number;
+      peak: number;
+      available: number;
+      waiting: number;
+    };
+  };
 }
 
 class Metrics {
@@ -46,6 +62,8 @@ class Metrics {
     prsAIFallbackQuality: 0,
     prsErrorDiffExtraction: 0,
     prsErrorSizeLimit: 0,
+    prsLoadShedPRSaturated: 0,
+    prsLoadShedAISaturated: 0,
     aiInvocationCount: 0,
     aiFallbackCount: 0,
     aiQualityRejectionCount: 0,
@@ -88,6 +106,14 @@ class Metrics {
     }
   }
 
+  recordLoadShedPRSaturated(): void {
+    this.counters.prsLoadShedPRSaturated++;
+  }
+
+  recordLoadShedAISaturated(): void {
+    this.counters.prsLoadShedAISaturated++;
+  }
+
   recordAIInvocation(): void {
     this.counters.aiInvocationCount++;
   }
@@ -107,7 +133,7 @@ class Metrics {
     this.counters.costTotalUSD += costUSD;
   }
 
-  snapshot(): MetricsSnapshot {
+  snapshot(prSemaphore?: { getInFlight(): number; getPeak(): number; getAvailable(): number; getWaiting(): number }, aiSemaphore?: { getInFlight(): number; getPeak(): number; getAvailable(): number; getWaiting(): number }): MetricsSnapshot {
     const uptimeMs = Date.now() - this.startTime.getTime();
     const uptimeSeconds = Math.floor(uptimeMs / 1000);
     
@@ -136,6 +162,8 @@ class Metrics {
         aiFallbackQuality: this.counters.prsAIFallbackQuality,
         errorDiffExtraction: this.counters.prsErrorDiffExtraction,
         errorSizeLimit: this.counters.prsErrorSizeLimit,
+        loadShedPRSaturated: this.counters.prsLoadShedPRSaturated,
+        loadShedAISaturated: this.counters.prsLoadShedAISaturated,
       },
       ai: {
         invocationCount: this.counters.aiInvocationCount,
@@ -153,6 +181,20 @@ class Metrics {
         totalUSD: parseFloat(this.counters.costTotalUSD.toFixed(6)),
         averagePerAIInvocation: parseFloat(averagePerAIInvocation.toFixed(6)),
         averagePerPR: parseFloat(averagePerPR.toFixed(6)),
+      },
+      concurrency: {
+        prPipelines: {
+          inFlight: prSemaphore?.getInFlight() ?? 0,
+          peak: prSemaphore?.getPeak() ?? 0,
+          available: prSemaphore?.getAvailable() ?? 0,
+          waiting: prSemaphore?.getWaiting() ?? 0,
+        },
+        aiCalls: {
+          inFlight: aiSemaphore?.getInFlight() ?? 0,
+          peak: aiSemaphore?.getPeak() ?? 0,
+          available: aiSemaphore?.getAvailable() ?? 0,
+          waiting: aiSemaphore?.getWaiting() ?? 0,
+        },
       },
     };
   }

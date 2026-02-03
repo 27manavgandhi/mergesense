@@ -8,6 +8,7 @@ import { logger } from '../observability/logger.js';
 import { recordFallback, recordAIInvocation } from './decision-trace.js';
 import { metrics } from '../metrics/metrics.js';
 import { calculateCost } from '../metrics/cost-model.js';
+import { aiSemaphore } from '../index.js';
 import type { DecisionTrace } from './decision-trace.js';
 
 function validateAIResponse(response: unknown): AIReviewOutput {
@@ -86,7 +87,18 @@ export async function generateReview(
     highConfidenceCount: riskAnalysis.highConfidenceSignals,
     mediumConfidenceCount: riskAnalysis.mediumConfidenceSignals,
   };
-  
+
+  const acquired = aiSemaphore.tryAcquire();
+  if (!acquired) {
+    logger.warn('ai_saturation', 'AI concurrency limit reached, falling back to deterministic review', {
+      inFlight: aiSemaphore.getInFlight(),
+      waiting: aiSemaphore.getWaiting(),
+    });
+    recordFallback(trace, 'api_error', 'AI concurrency limit exceeded');
+    metrics.recordLoadShedAISaturated();
+    return createFallbackReview(preChecks, files.length);
+  }
+
   try {
     const client = createClaudeClient();
     const systemPrompt = buildSystemPrompt();
@@ -188,5 +200,7 @@ export async function generateReview(
     }
     
     return createFallbackReview(preChecks, files.length);
+  } finally {
+    aiSemaphore.release();
   }
 }

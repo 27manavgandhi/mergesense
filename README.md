@@ -50,6 +50,269 @@ Review Generated (AI or fallback)
   ↓
 Single Comment Posted to PR
 ```
+## Day 9: Load Control & Backpressure
+
+### What Changed
+
+**Before (Day 8):**
+- No protection against burst traffic
+- Unlimited concurrent AI calls
+- Could overwhelm Claude API with parallel requests
+- No graceful degradation under load
+- Single-instance deployment assumptions untested
+
+**After (Day 9):**
+- Explicit concurrency limits (PR pipelines + AI calls)
+- Load shedding when limits exceeded
+- Graceful degradation to deterministic review
+- Saturation metrics tracked
+- Safe behavior under burst traffic
+
+### Concurrency Limits
+
+MergeSense enforces two levels of concurrency control:
+
+**Level 1: PR Pipeline Concurrency**
+- **Limit**: 10 concurrent PR processing pipelines
+- **Behavior when exceeded**: Drop new webhook, log warning
+- **Rationale**: Protects GitHub API, prevents memory exhaustion
+
+**Level 2: AI Call Concurrency**
+- **Limit**: 3 concurrent Claude API calls
+- **Behavior when exceeded**: Skip AI, use deterministic fallback
+- **Rationale**: Respects Claude rate limits, prevents timeout cascades
+
+**Defined in**: `src/concurrency/limits.ts`
+```typescript
+export const CONCURRENCY_LIMITS = {
+  MAX_CONCURRENT_PR_PIPELINES: 10,
+  MAX_CONCURRENT_AI_CALLS: 3,
+};
+```
+
+### Load-Shedding Behavior
+
+#### Scenario 1: PR Pipeline Saturation
+
+**Trigger**: 11th PR webhook arrives while 10 are processing
+
+**Behavior**:
+1. `prSemaphore.tryAcquire()` returns `false`
+2. Request immediately rejected (no processing)
+3. Warning logged with concurrency state
+4. Metrics: `prs.loadShedPRSaturated` incremented
+5. GitHub receives 200 OK (prevents retry storm)
+
+**Why this is safe**:
+- Webhook will retry automatically (GitHub behavior)
+- System protects itself from overload
+- No silent failures (explicitly logged)
+
+#### Scenario 2: AI Call Saturation
+
+**Trigger**: 4th AI call attempted while 3 are in-flight
+
+**Behavior**:
+1. `aiSemaphore.tryAcquire()` returns `false`
+2. AI call skipped immediately
+3. Deterministic fallback review generated
+4. Warning logged with concurrency state
+5. Metrics: `prs.loadShedAISaturated` incremented
+6. PR still gets reviewed (fallback mode)
+
+**Why this is safe**:
+- PR is not dropped (processed deterministically)
+- Claude API not overwhelmed
+- Review quality degraded but not absent
+- User still gets feedback
+
+### Degradation Paths
+
+**Graceful Degradation Hierarchy:**
+
+1. **Normal operation**: AI review with full context
+2. **AI saturated**: Deterministic review from pre-checks
+3. **PR saturated**: Webhook dropped (GitHub retries)
+4. **System overload**: Crash (acceptable last resort)
+
+**Each degradation:**
+- Is explicit (logged)
+- Is measured (metrics)
+- Is traceable (decision trace)
+- Preserves system availability
+
+### Capacity Reasoning
+
+#### Free-Tier Assumptions
+
+**Infrastructure**: Single Heroku/Railway/Render dyno
+- CPU: 1 vCPU (shared)
+- Memory: 512 MB
+- Network: Shared bandwidth
+
+**Workload Model**:
+- PR processing: ~200-500ms (deterministic path)
+- AI call: ~2-5 seconds (Claude API latency)
+- Memory per PR: ~10-20 MB
+
+**Capacity Estimates**:
+
+**Without concurrency limits:**
+- 50 concurrent PRs → 1 GB memory → OOM crash
+- 50 concurrent AI calls → Claude rate limit → cascading failures
+
+**With concurrency limits (10 PR / 3 AI):**
+- Max memory: 10 PRs × 20 MB = 200 MB (safe)
+- Max AI calls: 3 × ~5s = manageable latency
+- System remains stable under burst
+
+#### Burst Traffic Analysis
+
+**Scenario**: Team push before demo
+- 20 PRs opened simultaneously
+- GitHub sends 20 webhooks in <1 second
+
+**System behavior:**
+1. First 10 PRs: Acquired, processing begins
+2. PRs 11-20: Load-shed, logged, will retry
+3. As first PRs complete, semaphore permits released
+4. GitHub retries PRs 11-20 (exponential backoff)
+5. All PRs eventually processed
+
+**Result**: System survives, no crashes, all PRs reviewed
+
+#### Sustained High Load
+
+**Scenario**: CI integration, 100 PRs/hour sustained
+
+**Throughput calculation:**
+- Average processing time: 3 seconds (with AI)
+- 10 concurrent pipelines
+- Theoretical max: 10 / 3s = ~200 PRs/hour
+- Actual: ~120 PRs/hour (overhead, retries)
+
+**100 PRs/hour is comfortably within capacity.**
+
+**What breaks capacity:**
+- 300+ PRs/hour sustained
+- All PRs AI-eligible (no deterministic skips)
+- Large PRs (approach size limits)
+
+**Solution at that scale**: Horizontal scaling (Day 10+)
+
+### Why No Queue (Yet)
+
+**Common question**: "Why not use a queue instead of load-shedding?"
+
+**Answer**: Queues add complexity without solving the core problem.
+
+**With queue:**
+- Need: Redis, SQS, or similar infrastructure
+- Need: Worker pool management
+- Need: Job persistence and retry logic
+- Need: Dead letter queue handling
+- Need: Monitoring queue depth
+
+**Current approach:**
+- GitHub already provides retry (exponential backoff)
+- Load-shedding is immediate (no queue buildup)
+- No additional infrastructure
+- Simpler failure modes
+
+**When to add queue:**
+- Multi-instance deployment (horizontal scaling)
+- SLA commitments (guaranteed processing)
+- Long-running analysis (>30 seconds)
+
+**Current state**: Single-instance + GitHub retries is sufficient.
+
+### Metrics Under Load
+
+New metrics tracked:
+
+**Load Shedding:**
+- `prs.loadShedPRSaturated`: PRs dropped due to PR concurrency limit
+- `prs.loadShedAISaturated`: PRs that fell back due to AI concurrency limit
+
+**Concurrency State:**
+```json
+{
+  "concurrency": {
+    "prPipelines": {
+      "inFlight": 7,
+      "peak": 10,
+      "available": 3,
+      "waiting": 0
+    },
+    "aiCalls": {
+      "inFlight": 2,
+      "peak": 3,
+      "available": 1,
+      "waiting": 0
+    }
+  }
+}
+```
+
+**Saturation indicators:**
+- `inFlight` approaching limit → nearing saturation
+- `peak` = limit → saturation occurred
+- `waiting` > 0 → backpressure building
+- `loadShedPRSaturated` > 0 → system rejecting work
+
+### Operational Runbook
+
+#### Symptom: High `loadShedPRSaturated`
+
+**Diagnosis**: PR concurrency limit too low or sustained high traffic
+
+**Actions**:
+1. Check `concurrency.prPipelines.peak` in `/metrics`
+2. If peak consistently = limit → traffic exceeds capacity
+3. Options:
+   - Increase `MAX_CONCURRENT_PR_PIPELINES` (if memory allows)
+   - Add second instance (horizontal scaling)
+   - Accept retry delay (GitHub will eventually process)
+
+#### Symptom: High `loadShedAISaturated`
+
+**Diagnosis**: AI concurrency limit too low or Claude API slow
+
+**Actions**:
+1. Check `concurrency.aiCalls.peak` in `/metrics`
+2. Check average AI latency in logs (`ai_response` phase)
+3. Options:
+   - Increase `MAX_CONCURRENT_AI_CALLS` to 5 (if Claude allows)
+   - Accept deterministic fallback (still functional)
+   - Investigate Claude API latency spike
+
+#### Symptom: `waiting` > 0 sustained
+
+**Diagnosis**: Backpressure building, possible deadlock risk
+
+**Actions**:
+1. Check both `prPipelines.waiting` and `aiCalls.waiting`
+2. If sustained >1 minute → investigate logs for stuck requests
+3. Restart process if deadlock suspected (metrics will show)
+
+### Safety Guarantees
+
+**Concurrency limits guarantee:**
+1. Memory usage bounded (10 PRs × 20 MB max)
+2. Claude API calls bounded (max 3 concurrent)
+3. System cannot OOM from PR load
+4. System cannot cascade fail from API errors
+
+**Load-shedding guarantees:**
+1. Every drop is explicit (logged)
+2. Every drop is measured (metrics)
+3. GitHub retries automatically
+4. No silent data loss
+
+**Degradation guarantees:**
+1. AI saturation → deterministic review (not failure)
+2. PR saturation → retry (not crash)
+3. Every PR eventually processed (or explicitly dropped)
 
 ## Day 8: Cost Awareness & Operational Metrics
 

@@ -15,6 +15,8 @@ export interface MetricsSnapshot {
     errorSizeLimit: number;
     loadShedPRSaturated: number;
     loadShedAISaturated: number;
+    duplicateWebhooks: number;
+    idempotentSkipped: number;
   };
   ai: {
     invocationCount: number;
@@ -47,6 +49,11 @@ export interface MetricsSnapshot {
       waiting: number;
     };
   };
+  idempotency: {
+    guardSize: number;
+    guardMaxSize: number;
+    guardTTLMs: number;
+  };
 }
 
 class Metrics {
@@ -64,6 +71,8 @@ class Metrics {
     prsErrorSizeLimit: 0,
     prsLoadShedPRSaturated: 0,
     prsLoadShedAISaturated: 0,
+    prsDuplicateWebhooks: 0,
+    prsIdempotentSkipped: 0,
     aiInvocationCount: 0,
     aiFallbackCount: 0,
     aiQualityRejectionCount: 0,
@@ -114,6 +123,14 @@ class Metrics {
     this.counters.prsLoadShedAISaturated++;
   }
 
+  recordDuplicateWebhook(): void {
+    this.counters.prsDuplicateWebhooks++;
+  }
+
+  recordIdempotentSkipped(): void {
+    this.counters.prsIdempotentSkipped++;
+  }
+
   recordAIInvocation(): void {
     this.counters.aiInvocationCount++;
   }
@@ -133,7 +150,11 @@ class Metrics {
     this.counters.costTotalUSD += costUSD;
   }
 
-  snapshot(prSemaphore?: { getInFlight(): number; getPeak(): number; getAvailable(): number; getWaiting(): number }, aiSemaphore?: { getInFlight(): number; getPeak(): number; getAvailable(): number; getWaiting(): number }): MetricsSnapshot {
+  snapshot(
+    prSemaphore?: { getInFlight(): number; getPeak(): number; getAvailable(): number; getWaiting(): number }, 
+    aiSemaphore?: { getInFlight(): number; getPeak(): number; getAvailable(): number; getWaiting(): number },
+    idempotencyGuard?: { getStats(): { size: number; maxSize: number; ttlMs: number } }
+  ): MetricsSnapshot {
     const uptimeMs = Date.now() - this.startTime.getTime();
     const uptimeSeconds = Math.floor(uptimeMs / 1000);
     
@@ -148,6 +169,8 @@ class Metrics {
     const averagePerPR = this.counters.prsTotal > 0
       ? this.counters.costTotalUSD / this.counters.prsTotal
       : 0;
+
+    const idempotencyStats = idempotencyGuard?.getStats() ?? { size: 0, maxSize: 0, ttlMs: 0 };
 
     return {
       processStartTime: this.startTime.toISOString(),
@@ -164,6 +187,8 @@ class Metrics {
         errorSizeLimit: this.counters.prsErrorSizeLimit,
         loadShedPRSaturated: this.counters.prsLoadShedPRSaturated,
         loadShedAISaturated: this.counters.prsLoadShedAISaturated,
+        duplicateWebhooks: this.counters.prsDuplicateWebhooks,
+        idempotentSkipped: this.counters.prsIdempotentSkipped,
       },
       ai: {
         invocationCount: this.counters.aiInvocationCount,
@@ -195,6 +220,11 @@ class Metrics {
           available: aiSemaphore?.getAvailable() ?? 0,
           waiting: aiSemaphore?.getWaiting() ?? 0,
         },
+      },
+      idempotency: {
+        guardSize: idempotencyStats.size,
+        guardMaxSize: idempotencyStats.maxSize,
+        guardTTLMs: idempotencyStats.ttlMs,
       },
     };
   }

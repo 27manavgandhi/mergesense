@@ -10,6 +10,7 @@ import { publishReview } from '../output/publisher.js';
 import { logger } from '../observability/logger.js';
 import { metrics } from '../metrics/metrics.js';
 import { prSemaphore } from '../index.js';
+import { idempotencyGuard } from '../idempotency/guard.js';
 import { 
   createDecisionTrace, 
   recordPreCheckResults, 
@@ -20,7 +21,34 @@ import {
   type DecisionTrace 
 } from '../analysis/decision-trace.js';
 
-export async function processPullRequest(context: PRContext, reviewId: string): Promise<void> {
+export async function processPullRequest(
+  context: PRContext, 
+  reviewId: string, 
+  idempotencyKey: string
+): Promise<void> {
+  const idempotencyResult = idempotencyGuard.checkAndMark(idempotencyKey);
+
+  if (idempotencyResult.status === 'duplicate_recent') {
+    logger.info('idempotency_guard', 'Duplicate webhook detected, skipping processing', {
+      idempotencyKey,
+      firstSeenAt: idempotencyResult.firstSeenAt,
+      owner: context.owner,
+      repo: context.repo,
+      pullNumber: context.pull_number,
+    });
+    metrics.recordDuplicateWebhook();
+    metrics.recordIdempotentSkipped();
+    return;
+  }
+
+  if (idempotencyResult.status === 'evicted') {
+    logger.warn('idempotency_guard', 'Idempotency key evicted from guard, processing anyway', {
+      idempotencyKey,
+      guardSize: idempotencyGuard.getStats().size,
+      guardMaxSize: idempotencyGuard.getStats().maxSize,
+    });
+  }
+
   const acquired = prSemaphore.tryAcquire();
   if (!acquired) {
     logger.warn('load_shedding', 'PR pipeline concurrency limit reached, dropping request', {
@@ -43,6 +71,7 @@ export async function processPullRequest(context: PRContext, reviewId: string): 
       owner: context.owner,
       repo: context.repo,
       pullNumber: context.pull_number,
+      idempotencyKey,
       concurrency: {
         inFlight: prSemaphore.getInFlight(),
         available: prSemaphore.getAvailable(),

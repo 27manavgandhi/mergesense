@@ -49,7 +49,318 @@ AI Decision:
 Review Generated (AI or fallback)
   ↓
 Single Comment Posted to PR
+
 ```
+
+## Day 10: Idempotency & Multi-Instance Readiness
+
+### What Changed
+
+**Before (Day 9):**
+- No duplicate webhook protection
+- Running 2 instances → undefined behavior
+- No idempotency strategy
+- State classification implicit
+- No persistence roadmap
+
+**After (Day 10):**
+- In-memory idempotency guard (best-effort)
+- Duplicate webhook detection
+- Explicit state classification
+- Multi-instance risks documented
+- Clear persistence roadmap for Phase 2
+
+### Idempotency Strategy
+
+**Idempotency Key Construction:**
+
+Every GitHub webhook is assigned a stable idempotency key:
+```
+{delivery_id}:{repo_full_name}:{pr_number}:{action}:{head_sha}
+```
+
+**Example:**
+```
+hook_123456:acme/api-server:42:opened:abc123def456
+```
+
+**Components:**
+- `delivery_id`: GitHub's unique webhook delivery ID
+- `repo_full_name`: `owner/repo`
+- `pr_number`: Pull request number
+- `action`: `opened` or `synchronize`
+- `head_sha`: Git commit SHA of PR head
+
+**Why this key:**
+- Stable across retries (same event = same key)
+- Unique per PR state change (new commit = new key)
+- Includes GitHub's delivery ID (external uniqueness)
+
+### In-Memory Idempotency Guard
+
+**Implementation**: `src/idempotency/guard.ts`
+
+**Behavior:**
+```typescript
+checkAndMark(key: string) → IdempotencyResult
+```
+
+**Results:**
+- `new`: First time seeing this key → process normally
+- `duplicate_recent`: Seen within TTL → skip processing
+- `evicted`: Seen but TTL expired → process anyway (warn)
+
+**Configuration:**
+- **Max entries**: 1,000 keys
+- **TTL**: 1 hour (3,600,000 ms)
+- **Eviction**: FIFO (oldest first when full)
+
+**Why these limits:**
+- 1,000 keys = ~100 KB memory
+- 1 hour TTL = covers GitHub retry window
+- FIFO eviction = predictable behavior
+
+### What Is Guaranteed Today (Single Instance)
+
+**Guaranteed:**
+1. Duplicate webhooks within 1 hour → Skipped
+2. Same PR commit reviewed max once per hour
+3. No duplicate PR comments (best-effort)
+4. Metrics track duplicate rate
+
+**Mechanism:**
+- In-memory guard tracks recent keys
+- Deterministic idempotency key extraction
+- Explicit logging of duplicates
+
+**Failure mode:**
+- Process restart → guard cleared → duplicates possible
+- Eviction after 1 hour → old key seen again → reprocessed
+
+**This is acceptable** because:
+- GitHub retries are typically <5 minutes apart
+- After 1 hour, PR likely changed (new commits)
+- False-positive (skip) preferred over false-negative (double-post)
+
+### What Is NOT Guaranteed (Multi-Instance)
+
+**Problem:**
+If 2 instances run simultaneously without shared state:
+
+**Scenario 1: Race Condition**
+```
+Instance A: Receives webhook at T+0ms
+Instance B: Receives same webhook at T+10ms (GitHub retry/load balancer)
+
+Instance A: checkAndMark() → "new" → process
+Instance B: checkAndMark() → "new" → process (different memory!)
+
+Result: 2 review comments posted
+```
+
+**Scenario 2: Split-Brain**
+```
+Instance A: Processes PR #42
+Instance B: Processes PR #43
+
+Both succeed, no collision.
+But Instance A has no knowledge of Instance B's state.
+```
+
+**What breaks:**
+- ❌ Idempotency guard is per-process (not shared)
+- ❌ Concurrency limits are per-process (not coordinated)
+- ❌ Metrics are per-process (not aggregated)
+
+**Visible in metrics:**
+- `duplicateWebhooks` underreported (split across instances)
+- `concurrency.prPipelines.inFlight` shows only local state
+
+**Current mitigation:**
+- **Don't run multiple instances without coordination**
+- If you must, accept duplicate risk
+- Monitor GitHub webhook delivery IDs for doubles
+
+### State Classification
+
+MergeSense state is classified into 3 categories:
+
+| State | Type | Current Storage | Future Storage | Reason |
+|-------|------|-----------------|----------------|---------|
+| **Idempotency keys** | Critical | In-memory (per-process) | Database/Redis | Must be shared across instances |
+| **Concurrency limits** | Critical | In-memory (per-process) | Redis (semaphore) | Must be coordinated across instances |
+| **Metrics counters** | Derived | In-memory (per-process) | Database (optional) | Can be recomputed from logs |
+| **Decision traces** | Ephemeral | Logged only | Logs | Not needed after logging |
+| **Semaphore state** | Ephemeral | In-memory | Redis (if multi-instance) | Only needed during execution |
+| **In-flight PR context** | Ephemeral | Stack/memory | None | Discarded after processing |
+| **Cost calculations** | Derived | Computed on-demand | Logs + DB (optional) | Can be recomputed from token logs |
+
+**Definitions:**
+- **Ephemeral**: Safe to lose on restart, not needed long-term
+- **Derived**: Can be recomputed from other data (logs, events)
+- **Critical**: Must be persisted for correctness across restarts/instances
+
+### Persistence Roadmap (Phase 2+)
+
+**When to add persistence:**
+1. Running 2+ instances (horizontal scaling required)
+2. SLA commitments (guaranteed delivery, no duplicates)
+3. Long-term metrics retention (trend analysis)
+4. Compliance requirements (audit trail)
+
+**Phase 2 (Multi-Instance Correctness):**
+
+**Add:** Redis for distributed state
+
+**Migrate:**
+- Idempotency guard → Redis SET with TTL
+- Concurrency limits → Redis-based distributed semaphore
+- Metrics → Aggregate across instances (optional)
+
+**Benefits:**
+- Shared idempotency across instances
+- Coordinated concurrency control
+- True duplicate prevention
+
+**Trade-offs:**
+- Redis dependency (infrastructure)
+- Network latency (slightly slower)
+- Complexity (failure modes, retries)
+
+**Phase 3 (Long-Term Persistence - Optional):**
+
+**Add:** PostgreSQL for durable state
+
+**Store:**
+- PR review history (for auditing)
+- Token usage per repo/team (for billing)
+- Aggregate metrics (for dashboards)
+
+**Do NOT store:**
+- Ephemeral runtime state
+- Derived metrics (recomputable from logs)
+- In-flight processing context
+
+**Current philosophy:**
+- Logs are primary audit trail
+- Metrics reset on restart (acceptable)
+- Database only when unavoidable
+
+### Multi-Instance Risk Mitigation Today
+
+**If you must run 2 instances now (not recommended):**
+
+**Option 1: Sticky Sessions**
+- Load balancer: Route by `repo` + `pr_number`
+- Same PR always hits same instance
+- Reduces (not eliminates) duplicate risk
+
+**Option 2: Accept Duplicates**
+- Monitor `duplicateWebhooks` metric closely
+- Set alert if >5% of total webhooks
+- GitHub API is idempotent (comment duplication is safe, just ugly)
+
+**Option 3: External Idempotency (Manual)**
+- Use external tool (e.g., nginx with Redis)
+- Deduplicate webhooks before they reach MergeSense
+- MergeSense becomes stateless again
+
+**Recommendation:** Wait for Phase 2 (proper Redis integration).
+
+### Metrics Under Idempotency
+
+New metrics tracked:
+
+**Duplicate Detection:**
+- `prs.duplicateWebhooks`: Webhooks identified as duplicates
+- `prs.idempotentSkipped`: PRs skipped due to idempotency guard
+
+**Idempotency Guard State:**
+```json
+{
+  "idempotency": {
+    "guardSize": 342,
+    "guardMaxSize": 1000,
+    "guardTTLMs": 3600000
+  }
+}
+```
+
+**Interpretation:**
+- `guardSize` approaching `guardMaxSize` → High PR volume, consider increasing limit
+- `duplicateWebhooks` > 0 → GitHub retries occurring (normal)
+- `duplicateWebhooks` / `prs.total` > 10% → Investigate webhook delivery issues
+
+### Operational Guidance
+
+#### Symptom: High `duplicateWebhooks`
+
+**Diagnosis**: GitHub retrying webhooks frequently
+
+**Possible causes:**
+1. Webhook processing taking >30s (GitHub timeout)
+2. Network issues between GitHub → MergeSense
+3. MergeSense returning non-200 during overload
+
+**Actions:**
+1. Check `ai_response` phase latency in logs
+2. Check `concurrency.prPipelines.peak` (hitting limit?)
+3. Check GitHub webhook delivery logs
+4. Ensure webhook handler returns 200 immediately
+
+#### Symptom: `guardSize` consistently at `guardMaxSize`
+
+**Diagnosis**: Processing 1,000+ unique PRs per hour
+
+**Actions:**
+1. Increase `MAX_ENTRIES` in `src/idempotency/guard.ts`
+2. Monitor memory usage
+3. Consider reducing TTL if memory constrained
+
+#### Symptom: Duplicate PR comments in multi-instance
+
+**Diagnosis**: Idempotency guard not shared across instances
+
+**Actions:**
+1. Confirm multiple instances are running
+2. Check load balancer configuration
+3. Implement sticky sessions (temporary)
+4. Plan migration to Phase 2 (Redis)
+
+### Why No Database Yet
+
+**Common question**: "Why not just add Redis/Postgres now?"
+
+**Answer**: Premature infrastructure has real costs.
+
+**Costs of adding persistence now:**
+- Setup: Redis instance, connection pooling, retry logic
+- Monitoring: Redis health, connection errors, latency
+- Failure modes: Redis down, network partition, stale data
+- Complexity: Distributed state synchronization
+- Operational: Backups, upgrades, capacity planning
+
+**Benefits of waiting:**
+- Single-instance deployment works correctly
+- No infrastructure dependencies
+- Simpler failure modes
+- Faster iteration
+- Clear understanding of what needs persistence
+
+**Current state is defensible:**
+- Logs provide audit trail
+- Metrics answer operational questions
+- Idempotency guard works for single-instance
+- Multi-instance can wait until traffic demands it
+
+**When to add persistence:**
+- Traffic exceeds single-instance capacity
+- Need 99.9% uptime (multi-instance required)
+- Customer SLA commitments
+- Compliance requirements
+
+**Until then:** Keep it simple.
+
 ## Day 9: Load Control & Backpressure
 
 ### What Changed

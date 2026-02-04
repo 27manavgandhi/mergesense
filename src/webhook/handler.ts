@@ -9,9 +9,20 @@ function verifySignature(payload: string, signature: string, secret: string): bo
   return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
 }
 
+function extractIdempotencyKey(body: any): string {
+  const deliveryId = body.hook_id || 'unknown';
+  const repoFullName = body.repository?.full_name || 'unknown';
+  const prNumber = body.pull_request?.number || 0;
+  const action = body.action || 'unknown';
+  const headSha = body.pull_request?.head?.sha || 'unknown';
+  
+  return `${deliveryId}:${repoFullName}:${prNumber}:${action}:${headSha}`;
+}
+
 export async function webhookHandler(req: Request, res: Response, reviewId: string): Promise<void> {
   const signature = req.headers['x-hub-signature-256'] as string;
   const event = req.headers['x-github-event'] as string;
+  const deliveryId = req.headers['x-github-delivery'] as string;
 
   if (!signature) {
     logger.warn('webhook_validation', 'Missing signature header');
@@ -61,9 +72,17 @@ export async function webhookHandler(req: Request, res: Response, reviewId: stri
     installation_id: installationId
   };
 
-  res.status(200).json({ message: 'Processing', reviewId });
+  const idempotencyKey = extractIdempotencyKey(req.body);
 
-  processPullRequest(context, reviewId).catch(err => {
+  logger.info('webhook_received', 'Webhook accepted', {
+    deliveryId,
+    idempotencyKey,
+    action,
+  });
+
+  res.status(200).json({ message: 'Processing', reviewId, idempotencyKey });
+
+  processPullRequest(context, reviewId, idempotencyKey).catch(err => {
     logger.error('pipeline_fatal', 'Unhandled pipeline error', {
       error: err instanceof Error ? err.message : 'Unknown error',
       stack: err instanceof Error ? err.stack : undefined,

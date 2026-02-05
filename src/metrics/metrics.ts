@@ -1,8 +1,16 @@
 import { PipelinePath } from '../analysis/decision-trace.js';
+import { isRedisHealthy } from '../persistence/redis-client.js';
+import type { DistributedSemaphore } from '../persistence/types.js';
+import type { IdempotencyStore } from '../persistence/types.js';
 
 export interface MetricsSnapshot {
   processStartTime: string;
   uptimeSeconds: number;
+  redis: {
+    enabled: boolean;
+    healthy: boolean;
+    mode: 'distributed' | 'degraded' | 'single-instance';
+  };
   prs: {
     total: number;
     aiInvoked: number;
@@ -53,6 +61,7 @@ export interface MetricsSnapshot {
     guardSize: number;
     guardMaxSize: number;
     guardTTLMs: number;
+    type: 'redis' | 'memory';
   };
 }
 
@@ -150,11 +159,12 @@ class Metrics {
     this.counters.costTotalUSD += costUSD;
   }
 
-  snapshot(
-    prSemaphore?: { getInFlight(): number; getPeak(): number; getAvailable(): number; getWaiting(): number }, 
-    aiSemaphore?: { getInFlight(): number; getPeak(): number; getAvailable(): number; getWaiting(): number },
-    idempotencyGuard?: { getStats(): { size: number; maxSize: number; ttlMs: number } }
-  ): MetricsSnapshot {
+  async snapshot(
+    prSemaphore?: DistributedSemaphore, 
+    aiSemaphore?: DistributedSemaphore,
+    idempotencyGuard?: IdempotencyStore,
+    redisEnabled?: boolean
+  ): Promise<MetricsSnapshot> {
     const uptimeMs = Date.now() - this.startTime.getTime();
     const uptimeSeconds = Math.floor(uptimeMs / 1000);
     
@@ -170,11 +180,27 @@ class Metrics {
       ? this.counters.costTotalUSD / this.counters.prsTotal
       : 0;
 
-    const idempotencyStats = idempotencyGuard?.getStats() ?? { size: 0, maxSize: 0, ttlMs: 0 };
+    const idempotencyStats = idempotencyGuard?.getStats() ?? { size: 0, maxSize: 0, ttlMs: 0, type: 'memory' as const };
+    const redisHealthy = isRedisHealthy();
+    
+    let redisMode: 'distributed' | 'degraded' | 'single-instance' = 'single-instance';
+    if (redisEnabled) {
+      redisMode = redisHealthy ? 'distributed' : 'degraded';
+    }
+
+    const prInFlight = prSemaphore ? await prSemaphore.getInFlight() : 0;
+    const prAvailable = prSemaphore ? await prSemaphore.getAvailable() : 0;
+    const aiInFlight = aiSemaphore ? await aiSemaphore.getInFlight() : 0;
+    const aiAvailable = aiSemaphore ? await aiSemaphore.getAvailable() : 0;
 
     return {
       processStartTime: this.startTime.toISOString(),
       uptimeSeconds,
+      redis: {
+        enabled: redisEnabled ?? false,
+        healthy: redisHealthy,
+        mode: redisMode,
+      },
       prs: {
         total: this.counters.prsTotal,
         aiInvoked: this.counters.prsAIInvoked,
@@ -209,15 +235,15 @@ class Metrics {
       },
       concurrency: {
         prPipelines: {
-          inFlight: prSemaphore?.getInFlight() ?? 0,
+          inFlight: prInFlight,
           peak: prSemaphore?.getPeak() ?? 0,
-          available: prSemaphore?.getAvailable() ?? 0,
+          available: prAvailable,
           waiting: prSemaphore?.getWaiting() ?? 0,
         },
         aiCalls: {
-          inFlight: aiSemaphore?.getInFlight() ?? 0,
+          inFlight: aiInFlight,
           peak: aiSemaphore?.getPeak() ?? 0,
-          available: aiSemaphore?.getAvailable() ?? 0,
+          available: aiAvailable,
           waiting: aiSemaphore?.getWaiting() ?? 0,
         },
       },
@@ -225,6 +251,7 @@ class Metrics {
         guardSize: idempotencyStats.size,
         guardMaxSize: idempotencyStats.maxSize,
         guardTTLMs: idempotencyStats.ttlMs,
+        type: idempotencyStats.type,
       },
     };
   }

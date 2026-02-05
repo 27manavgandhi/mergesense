@@ -52,6 +52,321 @@ Single Comment Posted to PR
 
 ```
 
+## Day 11: Distributed Correctness with Redis
+
+### What Changed
+
+**Before (Day 10):**
+- Single-instance only (multi-instance undefined)
+- In-memory idempotency guard (per-process)
+- In-memory concurrency limits (per-process)
+- Duplicate PRcomments possible across instances
+- No distributed coordination
+
+**After (Day 11):**
+- Multi-instance ready (with Redis)
+- Distributed idempotency (shared across instances)
+- Distributed concurrency limits (coordinated)
+- Duplicate PR comments prevented (Redis-backed)
+- Graceful degradation (fails open if Redis down)
+
+### What Redis Is Used For
+
+**Exactly 2 things:**
+
+1. **Distributed Idempotency**
+   - Shared deduplication across instances
+   - Prevents duplicate PR comments
+   - TTL-based (1 hour window)
+
+2. **Distributed Concurrency Control**
+   - Coordinated semaphores across instances
+   - Global limits enforced (not per-instance)
+   - Atomic permit acquisition/release
+
+**What Redis is NOT used for:**
+- ❌ Metrics aggregation (still per-process)
+- ❌ Long-term data persistence
+- ❌ Message queues
+- ❌ Background job processing
+- ❌ Session storage
+- ❌ Caching application data
+
+### Multi-Instance Guarantees (With Redis)
+
+**Guaranteed:**
+1. Duplicate webhooks across instances → Deduplicated
+2. Same PR reviewed max once per hour (globally)
+3. No duplicate PR comments (coordinated)
+4. Concurrency limits enforced globally
+5. Max N PR pipelines across all instances
+6. Max M AI calls across all instances
+
+**Mechanism:**
+- Redis SET with NX + TTL for idempotency
+- Lua scripts for atomic semaphore operations
+- Fail-open degradation if Redis unavailable
+
+### Degraded-Mode Behavior
+
+**If Redis goes down:**
+
+**Immediate effect:**
+- System logs: "Redis unavailable, degrading to in-memory mode"
+- `redis.mode` in `/metrics`: `degraded`
+
+**Idempotency behavior:**
+- Falls back to per-instance in-memory guard
+- Duplicates possible across instances
+- Still prevents duplicates within single instance
+
+**Concurrency behavior:**
+- Falls back to per-instance limits
+- Global limits not enforced
+- Each instance enforces local limits only
+
+**System continues running:**
+- All PRs still processed
+- Reviews still posted
+- No hard failures
+- Prefer availability over strict correctness
+
+**Why fail-open is safe:**
+- Duplicate PR comments are ugly, not catastrophic
+- Better than stopping all reviews
+- Degraded state is explicit (logged + metrics)
+- Normal operation resumes when Redis recovers
+
+### Configuration
+
+**Single instance (no Redis):**
+```bash
+# .env
+GITHUB_APP_ID=123456
+GITHUB_PRIVATE_KEY="..."
+GITHUB_WEBHOOK_SECRET=secret
+ANTHROPIC_API_KEY=sk-ant-...
+# REDIS_URL not set
+PORT=3000
+```
+
+**Multi-instance (with Redis):**
+```bash
+# .env
+GITHUB_APP_ID=123456
+GITHUB_PRIVATE_KEY="..."
+GITHUB_WEBHOOK_SECRET=secret
+ANTHROPIC_API_KEY=sk-ant-...
+REDIS_URL=redis://localhost:6379
+PORT=3000
+```
+
+**Redis URL formats:**
+- Local: `redis://localhost:6379`
+- Auth: `redis://:password@host:6379`
+- TLS: `rediss://user:password@host:6379`
+- Heroku/Railway: `redis://user:pass@host:port` (provided automatically)
+
+### Operational Assumptions
+
+**Redis requirements:**
+- Single Redis instance sufficient (no cluster needed)
+- No persistence required (ephemeral state)
+- Free-tier Redis works (Heroku, Railway, Render, Upstash)
+
+**Redis operations:**
+- SET with NX + EX (idempotency keys)
+- EVAL (Lua scripts for semaphores)
+- GET (reading counters)
+- TTL (checking expiration)
+
+**No Redis operations used:**
+- PUBLISH/SUBSCRIBE
+- Sorted sets
+- Lists/queues
+- Transactions (MULTI/EXEC)
+- Streams
+
+**Connection handling:**
+- Max 2 retries per command
+- 2-second command timeout
+- 5-second connect timeout
+- Exponential backoff on reconnect (max 3 attempts)
+
+**Memory usage:**
+- Idempotency keys: ~50 bytes each
+- 1,000 PRs/hour = ~50 KB
+- Semaphore counters: ~100 bytes total
+- Total: <1 MB Redis memory typical
+
+### What Is Now Guaranteed
+
+**With Redis enabled (multi-instance):**
+
+| Guarantee | Scope | Mechanism |
+|-----------|-------|-----------|
+| No duplicate PR comments | Global (all instances) | Redis SET NX |
+| Idempotency within 1 hour | Global | Redis TTL |
+| Concurrency limits enforced | Global | Lua scripts |
+| Max N PR pipelines total | Global | Redis counter |
+| Max M AI calls total | Global | Redis counter |
+
+**Without Redis (single-instance):**
+
+| Guarantee | Scope | Mechanism |
+|-----------|-------|-----------|
+| No duplicate PR comments | Local (per-instance) | In-memory guard |
+| Idempotency within 1 hour | Local | In-memory TTL |
+| Concurrency limits enforced | Local | In-memory semaphore |
+| Max N PR pipelines | Local | Local counter |
+| Max M AI calls | Local | Local counter |
+
+### Phase 2 Completion
+
+**Day 11 completes Phase 2 of MergeSense.**
+
+**Phase 2 goals achieved:**
+- ✅ Horizontal scalability (multi-instance ready)
+- ✅ Distributed correctness (no duplicate comments)
+- ✅ Coordinated concurrency (global limits)
+- ✅ Graceful degradation (fail-open behavior)
+- ✅ Operational maturity (Redis optional, not required)
+
+**What Phase 2 did NOT add:**
+- ❌ Long-term persistence (metrics still reset on restart)
+- ❌ Job queues (still stateless request processing)
+- ❌ Background workers (still synchronous pipeline)
+- ❌ User accounts (still GitHub App only)
+- ❌ Configuration UI (still environment variables)
+
+**Phase 3 would add (future):**
+- PostgreSQL for durable metrics
+- Historical trend analysis
+- Per-repo configuration
+- Compliance audit trails
+- SLA monitoring
+
+**Current state:**
+- Production-ready for free-tier deployment
+- Scales horizontally with Redis
+- Operationally simple (no complex infrastructure)
+- Honest about limits (documented degradation)
+
+### Metrics Under Redis
+
+New metrics tracked:
+
+**Redis Health:**
+```json
+{
+  "redis": {
+    "enabled": true,
+    "healthy": true,
+    "mode": "distributed"
+  }
+}
+```
+
+**Modes:**
+- `single-instance`: Redis not configured
+- `distributed`: Redis healthy, multi-instance safe
+- `degraded`: Redis configured but unhealthy, fallback active
+
+**Idempotency type:**
+```json
+{
+  "idempotency": {
+    "type": "redis"
+  }
+}
+```
+
+**Interpretation:**
+- `redis.enabled: false` → Single instance, in-memory only
+- `redis.mode: degraded` → Redis down, investigate
+- `idempotency.type: memory` → Per-instance deduplication only
+
+### Operational Runbook
+
+#### Symptom: `redis.mode: degraded`
+
+**Diagnosis**: Redis connection failed or unhealthy
+
+**Actions:**
+1. Check Redis service status
+2. Verify `REDIS_URL` environment variable
+3. Check Redis logs for errors
+4. Check network connectivity
+5. Verify Redis credentials
+
+**Temporary mitigation:**
+- System continues in degraded mode
+- Single-instance deployment still safe
+- Multi-instance: Stop extra instances until Redis recovers
+
+#### Symptom: Duplicate PR comments (multi-instance + Redis)
+
+**Diagnosis**: Should not happen with healthy Redis
+
+**Actions:**
+1. Check `redis.mode` in `/metrics` (should be `distributed`)
+2. Check Redis logs for SETEX/EVAL failures
+3. Verify all instances using same Redis
+4. Check for Redis network partitions
+
+**If Redis is healthy but duplicates occur:**
+- Severe bug, escalate immediately
+- Stop all instances except one
+- Investigate idempotency key construction
+
+#### Symptom: High Redis latency
+
+**Diagnosis**: Redis slow, affecting review latency
+
+**Actions:**
+1. Check Redis command timeouts in logs
+2. Verify Redis not overloaded (check memory/CPU)
+3. Consider upgrading Redis tier
+4. Check network latency to Redis
+
+**Commands affected:**
+- Idempotency check (adds ~5-50ms per webhook)
+- Semaphore acquire/release (adds ~5-50ms per PR)
+
+**Total impact:** +10-100ms per PR review
+
+### Why Redis (And Not Something Else)
+
+**Common question**: "Why Redis and not X?"
+
+**vs. PostgreSQL:**
+- Redis: In-memory, <5ms latency, TTL built-in
+- Postgres: Disk-based, 10-50ms latency, manual cleanup
+- Choice: Redis (speed + TTL semantics)
+
+**vs. Memcached:**
+- Redis: Lua scripts (atomic operations)
+- Memcached: No scripting, no atomicity guarantees
+- Choice: Redis (atomicity required for semaphores)
+
+**vs. Distributed locks (Redlock):**
+- Redlock: Requires 3-5 Redis instances
+- Single Redis: Sufficient for MergeSense scale
+- Choice: Single Redis (simpler, cheaper)
+
+**vs. No persistence:**
+- No persistence: Duplicates in multi-instance
+- Redis: Prevents duplicates
+- Choice: Redis when scaling horizontally
+
+**Current Redis usage:**
+- Minimal (2 data structures)
+- TTL-based (no manual cleanup)
+- Stateless (no durable persistence)
+- Optional (system works without it)
+
+**This is the smallest useful Redis integration.**
+
 ## Day 10: Idempotency & Multi-Instance Readiness
 
 ### What Changed

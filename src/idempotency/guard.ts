@@ -1,13 +1,17 @@
 import { IdempotencyResult, IdempotencyEntry } from './types.js';
+import type { IdempotencyStore } from '../persistence/types.js';
+import { getRedisClient, isRedisHealthy } from '../persistence/redis-client.js';
+import { logger } from '../observability/logger.js';
 
 const MAX_ENTRIES = 1000;
 const TTL_MS = 3600000;
+const TTL_SECONDS = 3600;
 
-export class IdempotencyGuard {
+class InMemoryIdempotencyGuard implements IdempotencyStore {
   private entries: Map<string, IdempotencyEntry> = new Map();
   private insertionOrder: string[] = [];
 
-  checkAndMark(key: string): IdempotencyResult {
+  async checkAndMark(key: string): Promise<{ status: 'new' | 'duplicate_recent'; firstSeenAt?: Date }> {
     this.evictExpired();
 
     const existing = this.entries.get(key);
@@ -18,7 +22,6 @@ export class IdempotencyGuard {
       
       return {
         status: 'duplicate_recent',
-        key,
         firstSeenAt: existing.firstSeenAt,
       };
     }
@@ -37,7 +40,7 @@ export class IdempotencyGuard {
     this.entries.set(key, entry);
     this.insertionOrder.push(key);
 
-    return { status: 'new', key };
+    return { status: 'new' };
   }
 
   private evictExpired(): void {
@@ -66,18 +69,71 @@ export class IdempotencyGuard {
     this.entries.delete(oldestKey);
   }
 
-  getStats(): { size: number; maxSize: number; ttlMs: number } {
+  getStats(): { size: number; maxSize: number; ttlMs: number; type: 'redis' | 'memory' } {
     return {
       size: this.entries.size,
       maxSize: MAX_ENTRIES,
       ttlMs: TTL_MS,
+      type: 'memory',
     };
-  }
-
-  clear(): void {
-    this.entries.clear();
-    this.insertionOrder = [];
   }
 }
 
-export const idempotencyGuard = new IdempotencyGuard();
+class RedisIdempotencyGuard implements IdempotencyStore {
+  private peak: number = 0;
+
+  async checkAndMark(key: string): Promise<{ status: 'new' | 'duplicate_recent'; firstSeenAt?: Date }> {
+    const redis = getRedisClient();
+    
+    if (!redis || !isRedisHealthy()) {
+      logger.warn('idempotency_degraded', 'Redis unavailable, cannot enforce distributed idempotency', {
+        key,
+      });
+      return { status: 'new' };
+    }
+
+    try {
+      const redisKey = `idem:${key}`;
+      const result = await redis.set(redisKey, '1', 'EX', TTL_SECONDS, 'NX');
+      
+      if (result === null) {
+        const ttl = await redis.ttl(redisKey);
+        const firstSeenAt = new Date(Date.now() - ((TTL_SECONDS - ttl) * 1000));
+        
+        return {
+          status: 'duplicate_recent',
+          firstSeenAt,
+        };
+      }
+      
+      return { status: 'new' };
+    } catch (error) {
+      logger.error('idempotency_redis_error', 'Redis operation failed, failing open', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        key,
+      });
+      return { status: 'new' };
+    }
+  }
+
+  getStats(): { size: number; maxSize: number; ttlMs: number; type: 'redis' | 'memory' } {
+    return {
+      size: 0,
+      maxSize: 0,
+      ttlMs: TTL_MS,
+      type: 'redis',
+    };
+  }
+}
+
+export function createIdempotencyGuard(): IdempotencyStore {
+  if (getRedisClient() && isRedisHealthy()) {
+    logger.info('idempotency_initialization', 'Using Redis-backed idempotency guard');
+    return new RedisIdempotencyGuard();
+  } else {
+    logger.info('idempotency_initialization', 'Using in-memory idempotency guard');
+    return new InMemoryIdempotencyGuard();
+  }
+}
+
+export const idempotencyGuard = createIdempotencyGuard();

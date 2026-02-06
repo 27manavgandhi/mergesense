@@ -1,0 +1,45 @@
+import { PreCheckResult } from '../types.js';
+
+export type DecisionPath = 
+  | 'ai_review'
+  | 'silent_exit_safe'
+  | 'silent_exit_filtered'
+  | 'manual_review_warning'
+  | 'ai_fallback_error'
+  | 'ai_fallback_quality'
+  | 'error_diff_extraction'
+  | 'error_size_limit';
+
+export interface DecisionRecord {
+  reviewId: string;
+  timestamp: string;
+  pr: {
+    owner: string;
+    repo: string;
+    number: number;
+  };
+  path: DecisionPath;
+  aiInvoked: boolean;
+  aiBlocked: boolean;
+  aiBlockedReason?: string;
+  fallbackUsed: boolean;
+  fallbackReason?: string;
+  preCheckSummary: {
+    totalSignals: number;
+    highConfidence: number;
+    mediumConfidence: number;
+    lowConfidence: number;
+    criticalCategories: string[];
+  };
+  verdict?: 'safe' | 'safe_with_conditions' | 'requires_changes' | 'high_risk';
+  commentPosted: boolean;
+  processingTimeMs: number;
+  instanceMode: 'single-instance' | 'distributed' | 'degraded';
+}
+
+export interface SanitizedDecisionRecord extends Omit<DecisionRecord, 'pr'> {
+  pr: {
+    repo: string;
+    number: number;
+  };
+}

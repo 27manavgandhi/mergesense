@@ -52,6 +52,309 @@ Single Comment Posted to PR
 
 ```
 
+## Day 12: Decision History & Explainability
+
+### What Changed
+
+**Before (Day 11):**
+- Decisions logged but not retained
+- No way to explain why a PR was skipped
+- No historical view of pipeline behavior
+- Post-incident debugging required log archaeology
+
+**After (Day 12):**
+- Every decision recorded in bounded history
+- `/decisions` endpoint for recent decisions
+- Explainable: "Why was AI blocked?" → Check decision record
+- Auditable: "What happened to PR #42?" → Query history
+
+### What Is a Decision Record
+
+A **Decision Record** is a structured summary of how MergeSense processed a specific PR.
+
+**Every decision includes:**
+- `reviewId` - Unique identifier for this review
+- `timestamp` - When processing occurred
+- `pr` - Repository and PR number
+- `path` - Pipeline path taken (ai_review, silent_exit_safe, etc.)
+- `aiInvoked` - Whether AI was called
+- `aiBlocked` - Whether AI was intentionally skipped
+- `aiBlockedReason` - Why AI was blocked (if applicable)
+- `fallbackUsed` - Whether AI failed and fallback was used
+- `fallbackReason` - Why fallback occurred (if applicable)
+- `preCheckSummary` - Risk signal counts and categories
+- `verdict` - Final review verdict (if applicable)
+- `commentPosted` - Whether a PR comment was posted
+- `processingTimeMs` - How long processing took
+- `instanceMode` - single-instance / distributed / degraded
+
+**Example decision:**
+```json
+{
+  "reviewId": "a3f9c2d8e1b4",
+  "timestamp": "2026-02-06T15:30:45.123Z",
+  "pr": {
+    "repo": "acme/api-server",
+    "number": 42
+  },
+  "path": "ai_review",
+  "aiInvoked": true,
+  "aiBlocked": false,
+  "aiBlockedReason": "Risk signals within acceptable range for AI review",
+  "fallbackUsed": false,
+  "preCheckSummary": {
+    "totalSignals": 3,
+    "highConfidence": 2,
+    "mediumConfidence": 1,
+    "lowConfidence": 0,
+    "criticalCategories": ["authentication", "persistence"]
+  },
+  "verdict": "requires_changes",
+  "commentPosted": true,
+  "processingTimeMs": 3420,
+  "instanceMode": "distributed"
+}
+```
+
+### Decision Paths Explained
+
+**Pipeline paths:**
+
+| Path | Meaning | AI Invoked? | Comment Posted? |
+|------|---------|-------------|-----------------|
+| `ai_review` | Normal AI review completed | Yes | Yes |
+| `silent_exit_safe` | No risks detected, skipped | No | No |
+| `silent_exit_filtered` | Only lock files changed | No | No |
+| `manual_review_warning` | Too many high-risk signals | No | Yes (warning) |
+| `ai_fallback_error` | AI failed, deterministic fallback | Attempted | Yes (fallback) |
+| `ai_fallback_quality` | AI output rejected, fallback used | Yes | Yes (fallback) |
+| `error_diff_extraction` | Could not fetch PR diff | No | Yes (error) |
+| `error_size_limit` | PR too large | No | Yes (error) |
+
+**Using this data:**
+- "Why no review comment?" → Check `path: silent_exit_safe` or `silent_exit_filtered`
+- "Why no AI?" → Check `aiBlockedReason`
+- "Did AI actually run?" → Check `aiInvoked: true` and `fallbackUsed: false`
+- "How long did it take?" → Check `processingTimeMs`
+
+### When Records Are Created
+
+**Decision records are emitted:**
+- At the end of every PR processing attempt
+- Regardless of success or failure
+- Before semaphore release (inside `finally` block)
+- Asynchronously (never blocks PR processing)
+
+**Records are NOT emitted when:**
+- Webhook is rejected (signature failure, missing data)
+- Idempotency guard skips duplicate
+- Load-shedding drops request before processing starts
+
+**Why:** These events never enter the pipeline, so no decision was made.
+
+### Storage & Retention
+
+**In-memory mode (no Redis):**
+- Last 100 decisions stored in ring buffer
+- Oldest evicted when full
+- Reset on process restart
+- Per-instance only
+
+**Redis mode:**
+- Last 500 decisions stored in Redis list
+- Shared across all instances
+- Survives process restarts
+- Oldest evicted when full (LTRIM)
+
+**Query endpoint:**
+```bash
+GET /decisions?limit=50
+```
+
+**Response:**
+```json
+{
+  "decisions": [ /* array of sanitized decision records */ ],
+  "meta": {
+    "count": 50,
+    "limit": 50,
+    "total": 347,
+    "maxSize": 500,
+    "storageType": "redis"
+  }
+}
+```
+
+**Ordering:** Newest first (reverse chronological)
+
+### What Is NOT Recorded
+
+**Not included in decision records:**
+- Full PR diffs or file contents
+- API tokens or secrets
+- GitHub installation IDs
+- User emails or names
+- Specific code snippets
+- AI prompt content
+- AI response content
+- Internal system paths
+
+**Why:**
+- Privacy: No PII
+- Security: No secrets
+- Size: Bounded storage
+- Scope: Decisions, not data
+
+**What IS recorded:**
+- Repository name (public info)
+- PR number (public info)
+- Risk categories (metadata only)
+- Processing outcomes (decisions only)
+
+### Why This Is Not Durable Storage
+
+**Decision history is ephemeral by design:**
+
+**Bounded:** Max 100 (memory) or 500 (Redis) decisions
+**Eviction:** Oldest dropped when full
+**Reset:** Clears on restart (memory mode)
+**TTL:** No explicit TTL, but turnover is frequent
+
+**This is intentional:**
+- Not an audit log (yet)
+- Not for compliance (yet)
+- Not for analytics (yet)
+- Not for long-term trends
+
+**Purpose:** Post-incident debugging and operational visibility.
+
+**Phase 3 would add:**
+- PostgreSQL for durable audit trail
+- Queryable by repo, PR, date range
+- Retention policies (30/90 days)
+- Compliance-grade immutability
+
+**Current state:** Good enough for debugging, not for legal/compliance.
+
+### Privacy & Security
+
+**Data exposure:**
+- `/decisions` endpoint is **read-only**
+- No authentication (same as `/metrics`)
+- Exposes repo names and PR numbers (already public on GitHub)
+- Does **not** expose:
+  - Code content
+  - Usernames
+  - API keys
+  - Internal paths
+
+**Operational security:**
+- Decision recording failure never blocks PR processing
+- Recording errors logged but not fatal
+- Sanitization removes owner names from public endpoint
+- Full records in logs (for operators only)
+
+**Threat model:**
+- Endpoint intended for operators/debugging
+- Not public-facing (deploy behind firewall/VPN if needed)
+- No sensitive data exposed
+- No write/modify operations
+
+**Future:** Phase 3 would add authentication and RBAC.
+
+### Example Queries
+
+**Get last 10 decisions:**
+```bash
+curl http://localhost:3000/decisions?limit=10
+```
+
+**Find PR #42:**
+```bash
+curl http://localhost:3000/decisions?limit=100 | jq '.decisions[] | select(.pr.number == 42)'
+```
+
+**Count AI fallbacks:**
+```bash
+curl http://localhost:3000/decisions | jq '[.decisions[] | select(.fallbackUsed == true)] | length'
+```
+
+**Average processing time:**
+```bash
+curl http://localhost:3000/decisions | jq '[.decisions[].processingTimeMs] | add / length'
+```
+
+**Decisions by path:**
+```bash
+curl http://localhost:3000/decisions | jq '[.decisions[] | .path] | group_by(.) | map({path: .[0], count: length})'
+```
+
+### Operational Use Cases
+
+#### Use Case 1: "Why didn't PR #42 get reviewed?"
+
+**Steps:**
+1. `curl http://localhost:3000/decisions | jq '.decisions[] | select(.pr.number == 42)'`
+2. Check `path` field
+
+**Possible answers:**
+- `silent_exit_safe` → No risks detected, intentionally skipped
+- `silent_exit_filtered` → Only lock files, no code changes
+- `error_diff_extraction` → PR too large or diff unavailable
+- (Not in decisions) → Idempotency guard or load-shedding
+
+#### Use Case 2: "Why is AI blocked so often today?"
+
+**Steps:**
+1. `curl http://localhost:3000/decisions`
+2. Filter by `aiBlocked: true`
+3. Group by `aiBlockedReason`
+
+**Possible findings:**
+- Many `"No high-risk signals detected"` → Working as designed
+- Many `"Too many high-risk signals"` → PRs genuinely risky
+- Unexpected reason → Investigate pre-check logic
+
+#### Use Case 3: "Did the 5pm deployment break anything?"
+
+**Steps:**
+1. `curl http://localhost:3000/decisions`
+2. Filter by `timestamp` after 5pm
+3. Check for spikes in `ai_fallback_error` or `error_*` paths
+
+**Indicators:**
+- Sudden fallback rate increase → AI integration issue
+- New error paths → Pipeline regression
+- Processing time spike → Performance regression
+
+#### Use Case 4: "Are we in degraded mode?"
+
+**Steps:**
+1. `curl http://localhost:3000/decisions | jq '.decisions[0].instanceMode'`
+
+**Result:**
+- `"single-instance"` → No Redis, expected
+- `"distributed"` → Redis healthy
+- `"degraded"` → Redis down, investigate
+
+### Guarantees
+
+**What Day 12 guarantees:**
+1. Every pipeline execution emits a decision record
+2. Records retained for last N executions (100 or 500)
+3. `/decisions` endpoint always responds (may be empty)
+4. Recording failure never blocks PR processing
+5. Records are sanitized before public exposure
+
+**What Day 12 does NOT guarantee:**
+1. Long-term retention (bounded, evicted)
+2. Queryability beyond "recent N"
+3. Durability across restarts (memory mode)
+4. Authentication/authorization
+5. Compliance-grade audit trail
+
+**Phase 3 would address limitations 1-5.**
+
 ## Day 11: Distributed Correctness with Redis
 
 ### What Changed

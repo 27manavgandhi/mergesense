@@ -6,8 +6,9 @@ import { metrics } from './metrics/metrics.js';
 import { getPricingModel } from './metrics/cost-model.js';
 import { InMemorySemaphore, RedisSemaphore } from './concurrency/semaphore.js';
 import { CONCURRENCY_LIMITS, getConcurrencyLimits } from './concurrency/limits.js';
-import { initializeRedis, getRedisClient, shutdownRedis } from './persistence/redis-client.js';
+import { initializeRedis, getRedisClient, shutdownRedis, isRedisHealthy } from './persistence/redis-client.js';
 import { idempotencyGuard } from './idempotency/guard.js';
+import { createDecisionHistory, sanitizeDecision } from './decisions/history.js';
 import type { DistributedSemaphore } from './persistence/types.js';
 
 dotenv.config();
@@ -19,6 +20,7 @@ const redis = getRedisClient();
 
 export let prSemaphore: DistributedSemaphore;
 export let aiSemaphore: DistributedSemaphore;
+export const decisionHistory = createDecisionHistory(redisEnabled);
 
 if (redis) {
   prSemaphore = new RedisSemaphore('pr', CONCURRENCY_LIMITS.MAX_CONCURRENT_PR_PIPELINES);
@@ -28,6 +30,11 @@ if (redis) {
   prSemaphore = new InMemorySemaphore(CONCURRENCY_LIMITS.MAX_CONCURRENT_PR_PIPELINES);
   aiSemaphore = new InMemorySemaphore(CONCURRENCY_LIMITS.MAX_CONCURRENT_AI_CALLS);
   logger.info('semaphore_initialization', 'Using in-memory semaphores');
+}
+
+export function instanceMode(): 'single-instance' | 'distributed' | 'degraded' {
+  if (!redisEnabled) return 'single-instance';
+  return isRedisHealthy() ? 'distributed' : 'degraded';
 }
 
 const app = express();
@@ -77,6 +84,33 @@ app.get('/metrics', async (_req, res) => {
       error: error instanceof Error ? error.message : 'Unknown error',
     });
     res.status(500).json({ error: 'Failed to generate metrics' });
+  }
+});
+
+app.get('/decisions', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit as string) || 50;
+    const actualLimit = Math.min(Math.max(1, limit), 100);
+    
+    const decisions = await decisionHistory.getRecent(actualLimit);
+    const sanitized = decisions.map(sanitizeDecision);
+    const stats = await decisionHistory.getStats();
+    
+    res.status(200).json({
+      decisions: sanitized,
+      meta: {
+        count: sanitized.length,
+        limit: actualLimit,
+        total: stats.count,
+        maxSize: stats.maxSize,
+        storageType: stats.type,
+      },
+    });
+  } catch (error) {
+    logger.error('decisions_error', 'Failed to retrieve decision history', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+    res.status(500).json({ error: 'Failed to retrieve decisions' });
   }
 });
 

@@ -1,5 +1,7 @@
 import { PipelinePath } from '../analysis/decision-trace.js';
 import { isRedisHealthy } from '../persistence/redis-client.js';
+import { maybeInjectFault } from '../faults/injector.js';
+import { FaultInjectionError } from '../faults/types.js';
 import type { DistributedSemaphore } from '../persistence/types.js';
 import type { IdempotencyStore } from '../persistence/types.js';
 
@@ -96,6 +98,8 @@ class Metrics {
   }
 
   recordPipelinePath(path: PipelinePath): void {
+    maybeInjectFault('METRICS_WRITE_FAILURE');
+    
     switch (path) {
       case 'ai_review':
         this.counters.prsAIInvoked++;
@@ -165,6 +169,14 @@ class Metrics {
     idempotencyGuard?: IdempotencyStore,
     redisEnabled?: boolean
   ): Promise<MetricsSnapshot> {
+    try {
+      maybeInjectFault('METRICS_WRITE_FAILURE');
+    } catch (error) {
+      if (error instanceof FaultInjectionError) {
+        throw error;
+      }
+    }
+    
     const uptimeMs = Date.now() - this.startTime.getTime();
     const uptimeSeconds = Math.floor(uptimeMs / 1000);
     

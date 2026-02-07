@@ -9,9 +9,18 @@ import { CONCURRENCY_LIMITS, getConcurrencyLimits } from './concurrency/limits.j
 import { initializeRedis, getRedisClient, shutdownRedis, isRedisHealthy } from './persistence/redis-client.js';
 import { idempotencyGuard } from './idempotency/guard.js';
 import { createDecisionHistory, sanitizeDecision } from './decisions/history.js';
+import { faultController } from './faults/controller.js';
 import type { DistributedSemaphore } from './persistence/types.js';
 
 dotenv.config();
+
+faultController.initialize();
+
+if (faultController.isEnabled()) {
+  logger.info('faults_initialization', '⚠️  FAULT INJECTION ENABLED - CHAOS SAFETY MODE', {
+    config: faultController.getConfig(),
+  });
+}
 
 initializeRedis(process.env.REDIS_URL);
 
@@ -78,6 +87,10 @@ app.get('/metrics', async (_req, res) => {
       ...snapshot,
       pricing,
       limits,
+      faults: {
+        enabled: faultController.isEnabled(),
+        config: faultController.isEnabled() ? faultController.getConfig() : null,
+      },
     });
   } catch (error) {
     logger.error('metrics_error', 'Failed to generate metrics snapshot', {
@@ -119,6 +132,9 @@ const server = app.listen(PORT, () => {
   console.log(`MergeSense listening on port ${PORT}`);
   console.log(`Mode: ${mode}`);
   console.log(`Concurrency limits: PR pipelines=${CONCURRENCY_LIMITS.MAX_CONCURRENT_PR_PIPELINES}, AI calls=${CONCURRENCY_LIMITS.MAX_CONCURRENT_AI_CALLS}`);
+  if (faultController.isEnabled()) {
+    console.log('⚠️  FAULT INJECTION ENABLED - CHAOS SAFETY MODE');
+  }
 });
 
 process.on('SIGTERM', async () => {

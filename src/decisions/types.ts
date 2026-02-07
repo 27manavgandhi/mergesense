@@ -35,6 +35,7 @@ export interface DecisionRecord {
   commentPosted: boolean;
   processingTimeMs: number;
   instanceMode: 'single-instance' | 'distributed' | 'degraded';
+  faultsInjected?: string[];
 }
 
 export interface SanitizedDecisionRecord extends Omit<DecisionRecord, 'pr'> {

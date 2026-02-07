@@ -1,10 +1,13 @@
 import { Octokit } from '@octokit/rest';
 import { PRContext, DiffFile } from '../types.js';
+import { maybeInjectFault } from '../faults/injector.js';
 
 const MAX_FILES = 50;
-const MAX_TOTAL_CHANGES = 5000;
+const MAX_CHANGES = 5000;
 
 export async function extractDiff(octokit: Octokit, context: PRContext): Promise<DiffFile[]> {
+  maybeInjectFault('DIFF_EXTRACTION_FAIL');
+
   const { data: files } = await octokit.pulls.listFiles({
     owner: context.owner,
     repo: context.repo,
@@ -13,20 +16,18 @@ export async function extractDiff(octokit: Octokit, context: PRContext): Promise
   });
 
   if (files.length > MAX_FILES) {
-    throw new Error(`PR too large: ${files.length} files (max ${MAX_FILES})`);
+    throw new Error(`PR exceeds maximum file limit: ${files.length} > ${MAX_FILES}`);
   }
 
-  const totalChanges = files.reduce((sum, f) => sum + f.changes, 0);
-  if (totalChanges > MAX_TOTAL_CHANGES) {
-    throw new Error(`PR too large: ${totalChanges} changes (max ${MAX_TOTAL_CHANGES})`);
+  const totalChanges = files.reduce((sum, file) => sum + file.changes, 0);
+  if (totalChanges > MAX_CHANGES) {
+    throw new Error(`PR exceeds maximum changes limit: ${totalChanges} > ${MAX_CHANGES}`);
   }
 
-  return files.map(f => ({
-    filename: f.filename,
-    status: f.status as DiffFile['status'],
-    additions: f.additions,
-    deletions: f.deletions,
-    changes: f.changes,
-    patch: f.patch,
+  return files.map(file => ({
+    filename: file.filename,
+    status: file.status as 'added' | 'removed' | 'modified' | 'renamed',
+    changes: file.changes,
+    patch: file.patch || '',
   }));
 }

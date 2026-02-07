@@ -1,5 +1,7 @@
 import Redis from 'ioredis';
 import { logger } from '../observability/logger.js';
+import { maybeInjectFault } from '../faults/injector.js';
+import { FaultInjectionError } from '../faults/types.js';
 
 const CONNECT_TIMEOUT_MS = 5000;
 const COMMAND_TIMEOUT_MS = 2000;
@@ -77,7 +79,18 @@ export function getRedisClient(): Redis | null {
 }
 
 export function isRedisHealthy(): boolean {
-  return redisClient !== null && isHealthy;
+  try {
+    maybeInjectFault('REDIS_UNAVAILABLE');
+    return redisClient !== null && isHealthy;
+  } catch (error) {
+    if (error instanceof FaultInjectionError) {
+      logger.warn('fault_handling', 'Injected Redis unavailability', {
+        faultCode: error.faultCode,
+      });
+      return false;
+    }
+    return redisClient !== null && isHealthy;
+  }
 }
 
 export async function shutdownRedis(): Promise<void> {

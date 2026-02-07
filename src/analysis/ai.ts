@@ -9,6 +9,8 @@ import { recordFallback, recordAIInvocation } from './decision-trace.js';
 import { metrics } from '../metrics/metrics.js';
 import { calculateCost } from '../metrics/cost-model.js';
 import { aiSemaphore } from '../index.js';
+import { maybeInjectFault, isFaultEnabled } from '../faults/injector.js';
+import { FaultInjectionError } from '../faults/types.js';
 import type { DecisionTrace } from './decision-trace.js';
 
 function validateAIResponse(response: unknown): AIReviewOutput {
@@ -75,7 +77,8 @@ function createFallbackReview(preChecks: PreCheckResult, fileCount: number): Rev
 export async function generateReview(
   files: DiffFile[],
   preChecks: PreCheckResult,
-  trace: DecisionTrace
+  trace: DecisionTrace,
+  injectedFaults: string[]
 ): Promise<ReviewOutput> {
   const riskAnalysis = analyzeRiskSignals(preChecks);
   
@@ -88,10 +91,10 @@ export async function generateReview(
     mediumConfidenceCount: riskAnalysis.mediumConfidenceSignals,
   };
 
-  const acquired = aiSemaphore.tryAcquire();
+  const acquired = await aiSemaphore.tryAcquire();
   if (!acquired) {
     logger.warn('ai_saturation', 'AI concurrency limit reached, falling back to deterministic review', {
-      inFlight: aiSemaphore.getInFlight(),
+      inFlight: await aiSemaphore.getInFlight(),
       waiting: aiSemaphore.getWaiting(),
     });
     recordFallback(trace, 'api_error', 'AI concurrency limit exceeded');
@@ -100,6 +103,8 @@ export async function generateReview(
   }
 
   try {
+    maybeInjectFault('AI_TIMEOUT');
+    
     const client = createClaudeClient();
     const systemPrompt = buildSystemPrompt();
     const userPrompt = buildUserPrompt(input);
@@ -139,6 +144,8 @@ export async function generateReview(
         },
       });
     }
+    
+    maybeInjectFault('AI_MALFORMED_RESPONSE');
     
     const textContent = response.content.find(c => c.type === 'text');
     if (!textContent || !textContent.text) {
@@ -189,9 +196,17 @@ export async function generateReview(
     };
     
   } catch (error) {
+    if (error instanceof FaultInjectionError) {
+      injectedFaults.push(error.faultCode);
+      logger.warn('fault_handling', 'Handling injected fault in AI layer', {
+        faultCode: error.faultCode,
+      });
+    }
+    
     logger.error('ai_error', 'AI review failed, using fallback', {
       error: error instanceof Error ? error.message : 'Unknown error',
-      errorType: error instanceof AIResponseValidationError ? 'validation' : 'api',
+      errorType: error instanceof AIResponseValidationError ? 'validation' : 
+                 error instanceof FaultInjectionError ? 'fault_injection' : 'api',
     });
     
     if (!(error instanceof AIResponseValidationError)) {
@@ -201,6 +216,6 @@ export async function generateReview(
     
     return createFallbackReview(preChecks, files.length);
   } finally {
-    aiSemaphore.release();
+    await aiSemaphore.release();
   }
 }

@@ -1,6 +1,8 @@
 import { DecisionRecord, SanitizedDecisionRecord } from './types.js';
 import { getRedisClient, isRedisHealthy } from '../persistence/redis-client.js';
 import { logger } from '../observability/logger.js';
+import { maybeInjectFault } from '../faults/injector.js';
+import { FaultInjectionError } from '../faults/types.js';
 
 const MAX_IN_MEMORY_DECISIONS = 100;
 const MAX_REDIS_DECISIONS = 500;
@@ -10,6 +12,8 @@ class InMemoryDecisionHistory {
   private decisions: DecisionRecord[] = [];
 
   append(decision: DecisionRecord): void {
+    maybeInjectFault('DECISION_WRITE_FAILURE');
+    
     this.decisions.push(decision);
     
     if (this.decisions.length > MAX_IN_MEMORY_DECISIONS) {
@@ -33,6 +37,8 @@ class InMemoryDecisionHistory {
 
 class RedisDecisionHistory {
   async append(decision: DecisionRecord): Promise<void> {
+    maybeInjectFault('DECISION_WRITE_FAILURE');
+    
     const redis = getRedisClient();
     
     if (!redis || !isRedisHealthy()) {
@@ -112,6 +118,13 @@ class HybridDecisionHistory {
         await this.redis.append(decision);
       }
     } catch (error) {
+      if (error instanceof FaultInjectionError) {
+        logger.warn('fault_handling', 'Handling injected fault in decision history', {
+          faultCode: error.faultCode,
+        });
+        throw error;
+      }
+      
       logger.error('decision_history_append_error', 'Failed to append decision', {
         error: error instanceof Error ? error.message : 'Unknown error',
         reviewId: decision.reviewId,

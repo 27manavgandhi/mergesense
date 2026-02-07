@@ -52,6 +52,421 @@ Single Comment Posted to PR
 
 ```
 
+
+## Day 13: Failure Injection & Chaos Safety
+
+### What Changed
+
+**Before (Day 12):**
+- Failures understood theoretically
+- Fallback behavior untested in production scenarios
+- No controlled way to validate resilience
+- "What if Redis goes down?" → Hope for the best
+
+**After (Day 13):**
+- Failures triggerable on-demand via environment variables
+- Every failure mode validated under controlled chaos
+- Explicit proof that fallback logic works
+- "What if Redis goes down?" → Set `FAULT_REDIS_UNAVAILABLE=always`, observe
+
+### Why Failure Injection Exists
+
+**This is NOT:**
+- Unit testing (that's for development)
+- Load testing (that's for capacity planning)
+- Chaos Monkey (that's for randomly breaking production)
+
+**This IS:**
+- **Confidence engineering**: Proving the system behaves correctly under failure
+- **Failure-mode validation**: Verifying fallbacks actually work
+- **Distributed systems maturity**: Testing what happens when dependencies fail
+- **Production safety discipline**: Building trust through evidence
+
+**The principle:**
+> Senior engineers don't ask "what if X fails?"  
+> They **prove** what happens when X fails.
+
+### How It Works
+
+**Opt-in activation:**
+```bash
+FAULTS_ENABLED=true
+```
+
+**Without this flag, ALL fault injection is disabled (zero impact).**
+
+**Failure configuration:**
+Each fault can be configured individually:
+- `never` — Disabled (default)
+- `always` — Triggered every time
+- `0.0-1.0` — Probabilistic (e.g., `0.1` = 10% chance)
+
+**Example:**
+```bash
+FAULTS_ENABLED=true
+FAULT_AI_TIMEOUT=0.2          # 20% of AI calls timeout
+FAULT_REDIS_UNAVAILABLE=always  # Redis always reports unhealthy
+FAULT_PUBLISH_COMMENT_FAILURE=0.05  # 5% of comments fail to post
+```
+
+### Supported Faults
+
+| Fault Code | Injection Point | Impact |
+|------------|-----------------|--------|
+| `DIFF_EXTRACTION_FAIL` | Before GitHub API call | Diff fetch fails, error path triggered |
+| `AI_TIMEOUT` | Before Claude API call | AI invocation fails, fallback review generated |
+| `AI_MALFORMED_RESPONSE` | After Claude response | Invalid JSON triggers fallback |
+| `REDIS_UNAVAILABLE` | On `isRedisHealthy()` check | System degrades to in-memory mode |
+| `SEMAPHORE_LEAK_SIMULATION` | On semaphore release | Permit not released, concurrency limit decreases |
+| `DECISION_WRITE_FAILURE` | On decision history append | Decision not recorded (pipeline continues) |
+| `METRICS_WRITE_FAILURE` | On metrics write | Metrics not updated (pipeline continues) |
+| `PUBLISH_COMMENT_FAILURE` | Before GitHub comment post | Comment not posted (decision still recorded) |
+
+### Safety Guarantees
+
+**Day 13 guarantees:**
+1. **No silent data loss** — Every failure is logged explicitly
+2. **No double semaphore leaks** — Leak simulation is controlled, doesn't cascade
+3. **No stuck pipelines** — Faults never block indefinitely
+4. **No infinite retries** — Faults trigger once, fallback logic applies
+5. **Fallback logic still applies** — AI timeout → deterministic review
+6. **Decision history still records outcomes** — Even if decision write fails, it's logged
+7. **Metrics never block pipeline** — Metrics failure is non-fatal
+8. **System remains stateless** — Fault state is not persisted
+
+**Invariants that MUST hold:**
+- Injected faults never cause undefined behavior
+- Pipeline always completes or fails explicitly
+- Decisions are traceable (even if not recorded in history)
+- No production data corruption
+
+### Observability
+
+**Every injected fault:**
+1. Emits a structured log:
+```json
+{
+  "phase": "fault_injected",
+  "level": "warn",
+  "message": "Injecting controlled failure",
+  "data": {
+    "faultCode": "AI_TIMEOUT",
+    "mode": "chaos_safety"
+  }
+}
+```
+
+2. Is recorded in decision history:
+```json
+{
+  "reviewId": "...",
+  "faultsInjected": ["AI_TIMEOUT", "PUBLISH_COMMENT_FAILURE"]
+}
+```
+
+3. Affects the `DecisionPath` correctly:
+- AI timeout → `ai_fallback_error`
+- Diff extraction failure → `error_diff_extraction`
+- etc.
+
+**Query faults from decision history:**
+```bash
+curl http://localhost:3000/decisions | jq '.decisions[] | select(.faultsInjected != null)'
+```
+
+**Check if faults are enabled:**
+```bash
+curl http://localhost:3000/metrics | jq '.faults'
+```
+
+### Example Scenarios
+
+#### Scenario 1: AI Timeout → Deterministic Fallback
+
+**Configuration:**
+```bash
+FAULTS_ENABLED=true
+FAULT_AI_TIMEOUT=always
+```
+
+**Expected behavior:**
+1. PR opened
+2. Pre-checks run normally
+3. AI gating approves
+4. AI call attempted
+5. **Fault injected: AI_TIMEOUT**
+6. AI call fails
+7. Fallback review generated from pre-checks
+8. Comment posted with fallback content
+9. Decision recorded with `faultsInjected: ["AI_TIMEOUT"]`
+
+**Expected logs:**
+```json
+{"phase":"fault_injected","faultCode":"AI_TIMEOUT"}
+{"phase":"ai_error","errorType":"fault_injection"}
+{"phase":"decision_recorded","faultsInjected":["AI_TIMEOUT"]}
+```
+
+**Expected decision:**
+```json
+{
+  "path": "ai_fallback_error",
+  "aiInvoked": true,
+  "fallbackUsed": true,
+  "fallbackReason": "api_error: Injected fault: AI_TIMEOUT",
+  "faultsInjected": ["AI_TIMEOUT"]
+}
+```
+
+---
+
+#### Scenario 2: Redis Down → Degraded Mode
+
+**Configuration:**
+```bash
+FAULTS_ENABLED=true
+FAULT_REDIS_UNAVAILABLE=always
+```
+
+**Expected behavior:**
+1. PR opened
+2. `isRedisHealthy()` returns `false` (fault injected)
+3. Idempotency guard falls back to in-memory
+4. Semaphores fall back to in-memory
+5. Decision history falls back to in-memory
+6. PR processed normally (degraded mode)
+7. Decision recorded with `instanceMode: "degraded"`
+
+**Expected logs:**
+```json
+{"phase":"fault_handling","message":"Injected Redis unavailability"}
+{"phase":"idempotency_degraded","message":"Redis unavailable..."}
+{"phase":"semaphore_degraded","message":"Redis unavailable..."}
+```
+
+**Expected metrics:**
+```json
+{
+  "redis": {
+    "enabled": true,
+    "healthy": false,
+    "mode": "degraded"
+  }
+}
+```
+
+---
+
+#### Scenario 3: Comment Publish Failure → Decision Still Recorded
+
+**Configuration:**
+```bash
+FAULTS_ENABLED=true
+FAULT_PUBLISH_COMMENT_FAILURE=always
+```
+
+**Expected behavior:**
+1. PR processed normally
+2. Review generated (AI or deterministic)
+3. Publish attempt
+4. **Fault injected: PUBLISH_COMMENT_FAILURE**
+5. Comment not posted to GitHub
+6. `commentPosted: false` in decision record
+7. Decision still recorded in history
+
+**Expected logs:**
+```json
+{"phase":"fault_injected","faultCode":"PUBLISH_COMMENT_FAILURE"}
+{"phase":"fault_handling","message":"Publish failed (injected), decision still recorded"}
+```
+
+**Expected decision:**
+```json
+{
+  "commentPosted": false,
+  "faultsInjected": ["PUBLISH_COMMENT_FAILURE"]
+}
+```
+
+**Verify:** Decision exists in `/decisions` even though no GitHub comment was posted.
+
+---
+
+#### Scenario 4: Semaphore Leak Simulation
+
+**Configuration:**
+```bash
+FAULTS_ENABLED=true
+FAULT_SEMAPHORE_LEAK_SIMULATION=always
+```
+
+**Expected behavior:**
+1. PR processed
+2. Semaphore acquired
+3. Pipeline completes
+4. Release attempted
+5. **Fault injected: SEMAPHORE_LEAK_SIMULATION**
+6. Permit not released
+7. Next request finds fewer available permits
+8. After N requests, concurrency limit saturated
+
+**Expected logs:**
+```json
+{"phase":"fault_injected","faultCode":"SEMAPHORE_LEAK_SIMULATION"}
+{"phase":"fault_handling","message":"Semaphore release failed (injected), permit leaked"}
+```
+
+**Verify:**
+```bash
+# After first PR
+curl http://localhost:3000/metrics | jq '.concurrency.prPipelines.available'
+# 9 (should be 10)
+
+# After 10 PRs
+curl http://localhost:3000/metrics | jq '.concurrency.prPipelines.available'
+# 0 (all leaked)
+
+# 11th PR
+# Expected: load_shedding triggered
+```
+
+**Recovery:** Restart process to reset semaphores.
+
+---
+
+#### Scenario 5: Multiple Faults in Single Request
+
+**Configuration:**
+```bash
+FAULTS_ENABLED=true
+FAULT_AI_TIMEOUT=always
+FAULT_PUBLISH_COMMENT_FAILURE=always
+FAULT_METRICS_WRITE_FAILURE=always
+```
+
+**Expected behavior:**
+1. AI fails (fallback review)
+2. Metrics write fails (logged, ignored)
+3. Publish fails (decision records `commentPosted: false`)
+4. Decision recorded with all 3 faults
+
+**Expected decision:**
+```json
+{
+  "path": "ai_fallback_error",
+  "commentPosted": false,
+  "faultsInjected": [
+    "AI_TIMEOUT",
+    "METRICS_WRITE_FAILURE",
+    "PUBLISH_COMMENT_FAILURE"
+  ]
+}
+```
+
+---
+
+#### Scenario 6: Faults Disabled → Zero Impact
+
+**Configuration:**
+```bash
+FAULTS_ENABLED=false
+# (or just don't set it)
+```
+
+**Expected behavior:**
+- All fault injection code skipped
+- Zero performance impact
+- No fault-related logs
+- System behaves identically to Day 12
+
+**Verify:**
+```bash
+curl http://localhost:3000/metrics | jq '.faults.enabled'
+# false
+```
+
+---
+
+### Production Usage Warning
+
+⚠️ **DO NOT enable fault injection in production without understanding the consequences.**
+
+**Acceptable use cases:**
+- Staging environment testing
+- Pre-production validation
+- Chaos engineering drills
+- Incident response training
+
+**Unacceptable use cases:**
+- Production traffic (unless you know exactly what you're doing)
+- Customer-facing deployments
+- Live demos
+
+**If you must use in production:**
+- Use probabilistic faults (e.g., `0.01` = 1%)
+- Monitor decision history for `faultsInjected`
+- Have rollback plan
+- Alert on fault injection events
+
+---
+
+### How This Differs From Testing
+
+**Unit tests:**
+- Mock dependencies
+- Isolated components
+- Fast feedback loops
+- Run in CI
+
+**Fault injection:**
+- Real dependencies
+- Full system integration
+- Validates actual fallback paths
+- Runs in staging/production-like environments
+
+**Example:**
+- Unit test: "If Redis client throws error, fallback is called"
+- Fault injection: "When Redis is actually unhealthy, system degrades gracefully and continues processing PRs"
+
+---
+
+### Verification Steps
+
+**1. Enable faults and check metrics:**
+```bash
+FAULTS_ENABLED=true npm run dev
+curl http://localhost:3000/metrics | jq '.faults'
+```
+
+**2. Trigger AI timeout:**
+```bash
+FAULTS_ENABLED=true FAULT_AI_TIMEOUT=always npm run dev
+# Open PR, observe fallback review
+curl http://localhost:3000/decisions | jq '.decisions[0].faultsInjected'
+```
+
+**3. Simulate Redis down:**
+```bash
+FAULTS_ENABLED=true FAULT_REDIS_UNAVAILABLE=always npm run dev
+curl http://localhost:3000/metrics | jq '.redis.mode'
+# "degraded"
+```
+
+**4. Verify comment failure doesn't block decision:**
+```bash
+FAULTS_ENABLED=true FAULT_PUBLISH_COMMENT_FAILURE=always npm run dev
+# Open PR
+curl http://localhost:3000/decisions | jq '.decisions[0].commentPosted'
+# false
+# But decision still exists!
+```
+
+**5. Confirm zero impact when disabled:**
+```bash
+npm run dev  # No FAULTS_ENABLED
+# System behaves identically to Day 12
+```
+
 ## Day 12: Decision History & Explainability
 
 ### What Changed

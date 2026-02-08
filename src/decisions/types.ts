@@ -1,4 +1,5 @@
 import { PreCheckResult } from '../types.js';
+import type { InvariantViolation } from '../invariants/types.js';
 
 export type DecisionPath = 
   | 'ai_review'
@@ -36,6 +37,17 @@ export interface DecisionRecord {
   processingTimeMs: number;
   instanceMode: 'single-instance' | 'distributed' | 'degraded';
   faultsInjected?: string[];
+  invariantViolations?: {
+    total: number;
+    warn: number;
+    error: number;
+    fatal: number;
+    violations: Array<{
+      invariantId: string;
+      severity: string;
+      description: string;
+    }>;
+  };
 }
 
 export interface SanitizedDecisionRecord extends Omit<DecisionRecord, 'pr'> {

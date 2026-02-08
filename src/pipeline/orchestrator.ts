@@ -22,6 +22,8 @@ import {
   type DecisionTrace 
 } from '../analysis/decision-trace.js';
 import type { DecisionRecord } from '../decisions/types.js';
+import { safeCheckInvariants } from '../invariants/checker.js';
+import { metrics } from '../metrics/metrics.js';
 
 export async function processPullRequest(
   context: PRContext, 

@@ -24,6 +24,7 @@ import {
 import type { DecisionRecord } from '../decisions/types.js';
 import { safeCheckInvariants } from '../invariants/checker.js';
 import { metrics } from '../metrics/metrics.js';
+import { InvariantViolation } from '../invariants/types.js';
 
 export async function processPullRequest(
   context: PRContext, 
@@ -324,9 +325,21 @@ async function emitDecision(
   reviewId: string,
   trace: DecisionTrace,
   startTime: number,
-  injectedFaults: string[]
+  injectedFaults: string[],
+  invariantViolations: InvariantViolation[]
 ): Promise<void> {
   try {
+    // Check decision consistency invariants
+    const finalViolations = safeCheckInvariants({
+      pipelinePath: trace.pipelinePath,
+      commentPosted: trace.commentPosted,
+      fallbackUsed: trace.fallbackUsed,
+      fallbackReason: trace.fallbackReason ? `${trace.fallbackReason.trigger}: ${trace.fallbackReason.details}` : undefined,
+      verdict: trace.finalVerdict,
+    }, ['PIPELINE_PATH_VALID', 'DECISION_COMMENT_CONSISTENT', 'FALLBACK_ALWAYS_EXPLAINED']);
+    
+    const allViolations = [...invariantViolations, ...finalViolations];
+    
     const decision: DecisionRecord = {
       reviewId,
       timestamp: new Date().toISOString(),
@@ -347,15 +360,31 @@ async function emitDecision(
       processingTimeMs: Date.now() - startTime,
       instanceMode: instanceMode(),
       faultsInjected: injectedFaults.length > 0 ? injectedFaults : undefined,
+      invariantViolations: allViolations.length > 0 ? {
+        total: allViolations.length,
+        warn: allViolations.filter(v => v.severity === 'warn').length,
+        error: allViolations.filter(v => v.severity === 'error').length,
+        fatal: allViolations.filter(v => v.severity === 'fatal').length,
+        violations: allViolations.map(v => ({
+          invariantId: v.invariantId,
+          severity: v.severity,
+          description: v.description,
+        })),
+      } : undefined,
     };
 
     await decisionHistory.append(decision);
+    
+    if (allViolations.length > 0) {
+      metrics.recordInvariantViolations(allViolations);
+    }
     
     logger.info('decision_recorded', 'Decision record emitted', {
       reviewId,
       path: trace.pipelinePath,
       processingTimeMs: decision.processingTimeMs,
       faultsInjected: injectedFaults.length > 0 ? injectedFaults : undefined,
+      invariantViolations: allViolations.length > 0 ? allViolations.map(v => v.invariantId) : undefined,
     });
   } catch (error) {
     if (error instanceof FaultInjectionError) {

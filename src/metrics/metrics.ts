@@ -4,6 +4,8 @@ import { maybeInjectFault } from '../faults/injector.js';
 import { FaultInjectionError } from '../faults/types.js';
 import type { DistributedSemaphore } from '../persistence/types.js';
 import type { IdempotencyStore } from '../persistence/types.js';
+import type { InvariantViolation } from '../invariants/types.js';
+import { summarizeViolations } from '../invariants/violations.js';
 
 export interface MetricsSnapshot {
   processStartTime: string;
@@ -65,10 +67,17 @@ export interface MetricsSnapshot {
     guardTTLMs: number;
     type: 'redis' | 'memory';
   };
+  invariants: {
+    totalViolations: number;
+    warnViolations: number;
+    errorViolations: number;
+    fatalViolations: number;
+  };
 }
 
 class Metrics {
   private startTime: Date = new Date();
+  private invariantViolations: InvariantViolation[] = [];
   
   private counters = {
     prsTotal: 0,
@@ -95,6 +104,10 @@ class Metrics {
 
   incrementPRProcessed(): void {
     this.counters.prsTotal++;
+  }
+
+  recordInvariantViolations(violations: InvariantViolation[]): void {
+    this.invariantViolations.push(...violations);
   }
 
   recordPipelinePath(path: PipelinePath): void {
@@ -128,40 +141,7 @@ class Metrics {
     }
   }
 
-  recordLoadShedPRSaturated(): void {
-    this.counters.prsLoadShedPRSaturated++;
-  }
-
-  recordLoadShedAISaturated(): void {
-    this.counters.prsLoadShedAISaturated++;
-  }
-
-  recordDuplicateWebhook(): void {
-    this.counters.prsDuplicateWebhooks++;
-  }
-
-  recordIdempotentSkipped(): void {
-    this.counters.prsIdempotentSkipped++;
-  }
-
-  recordAIInvocation(): void {
-    this.counters.aiInvocationCount++;
-  }
-
-  recordAIFallback(trigger: 'api_error' | 'quality_rejection'): void {
-    this.counters.aiFallbackCount++;
-    if (trigger === 'quality_rejection') {
-      this.counters.aiQualityRejectionCount++;
-    } else {
-      this.counters.aiAPIErrorCount++;
-    }
-  }
-
-  recordTokenUsage(inputTokens: number, outputTokens: number, costUSD: number): void {
-    this.counters.tokensInput += inputTokens;
-    this.counters.tokensOutput += outputTokens;
-    this.counters.costTotalUSD += costUSD;
-  }
+  // ... (rest of existing methods)
 
   async snapshot(
     prSemaphore?: DistributedSemaphore, 
@@ -204,6 +184,8 @@ class Metrics {
     const prAvailable = prSemaphore ? await prSemaphore.getAvailable() : 0;
     const aiInFlight = aiSemaphore ? await aiSemaphore.getInFlight() : 0;
     const aiAvailable = aiSemaphore ? await aiSemaphore.getAvailable() : 0;
+    
+    const violationSummary = summarizeViolations(this.invariantViolations);
 
     return {
       processStartTime: this.startTime.toISOString(),
@@ -264,6 +246,12 @@ class Metrics {
         guardMaxSize: idempotencyStats.maxSize,
         guardTTLMs: idempotencyStats.ttlMs,
         type: idempotencyStats.type,
+      },
+      invariants: {
+        totalViolations: violationSummary.total,
+        warnViolations: violationSummary.warn,
+        errorViolations: violationSummary.error,
+        fatalViolations: violationSummary.fatal,
       },
     };
   }

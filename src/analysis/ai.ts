@@ -12,6 +12,7 @@ import { aiSemaphore } from '../index.js';
 import { maybeInjectFault, isFaultEnabled } from '../faults/injector.js';
 import { FaultInjectionError } from '../faults/types.js';
 import type { DecisionTrace } from './decision-trace.js';
+import { safeCheckInvariants } from '../invariants/checker.js';
 
 function validateAIResponse(response: unknown): AIReviewOutput {
   const errors: AIValidationError[] = [];
@@ -103,6 +104,12 @@ export async function generateReview(
   }
 
   try {
+    // Check AI gating invariant before invocation
+    safeCheckInvariants({
+      aiGatingAllowed: trace.aiGating.allowed,
+      aiInvoked: false, // Not yet invoked
+    }, ['AI_GATING_RESPECTED']);
+    
     maybeInjectFault('AI_TIMEOUT');
     
     const client = createClaudeClient();
@@ -118,6 +125,12 @@ export async function generateReview(
     
     recordAIInvocation(trace, true);
     metrics.recordAIInvocation();
+    
+    // Check AI gating invariant after recording invocation
+    safeCheckInvariants({
+      aiGatingAllowed: trace.aiGating.allowed,
+      aiInvoked: true,
+    }, ['AI_GATING_RESPECTED']);
     
     const response = await client.generateReview(systemPrompt, userPrompt);
     
@@ -167,6 +180,12 @@ export async function generateReview(
     
     const validated = validateAIResponse(parsed);
     
+    // Check verdict consistency invariant
+    safeCheckInvariants({
+      verdict: validated.verdict,
+      risks: validated.risks,
+    }, ['DECISION_VERDICT_CONSISTENT']);
+    
     const qualityCheck = validateReviewQuality(validated);
     if (!qualityCheck.passed) {
       logger.warn('review_quality', 'AI review rejected due to quality check', {
@@ -176,6 +195,13 @@ export async function generateReview(
       });
       recordFallback(trace, 'quality_rejection', qualityCheck.reason!);
       metrics.recordAIFallback('quality_rejection');
+      
+      // Check fallback explanation invariant
+      safeCheckInvariants({
+        fallbackUsed: true,
+        fallbackReason: qualityCheck.reason,
+      }, ['FALLBACK_ALWAYS_EXPLAINED']);
+      
       return createFallbackReview(preChecks, files.length);
     }
     
@@ -210,8 +236,15 @@ export async function generateReview(
     });
     
     if (!(error instanceof AIResponseValidationError)) {
-      recordFallback(trace, 'api_error', error instanceof Error ? error.message : 'Unknown error');
+      const fallbackReason = error instanceof Error ? error.message : 'Unknown error';
+      recordFallback(trace, 'api_error', fallbackReason);
       metrics.recordAIFallback('api_error');
+      
+      // Check fallback explanation invariant
+      safeCheckInvariants({
+        fallbackUsed: true,
+        fallbackReason,
+      }, ['FALLBACK_ALWAYS_EXPLAINED']);
     }
     
     return createFallbackReview(preChecks, files.length);

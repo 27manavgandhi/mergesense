@@ -33,6 +33,7 @@ export async function processPullRequest(
 ): Promise<void> {
   const startTime = Date.now();
   const injectedFaults: string[] = [];
+  const invariantViolations: InvariantViolation[] = [];
   
   const idempotencyResult = await idempotencyGuard.checkAndMark(idempotencyKey);
 
@@ -129,7 +130,8 @@ export async function processPullRequest(
       
       logger.info('pipeline_complete', 'Pipeline finished with error', { trace });
       
-      await emitDecision(context, reviewId, trace, startTime, injectedFaults);
+      await emitDecision(context, reviewId, trace, startTime, injectedFaults, invariantViolations);
+      
       return;
     }
 

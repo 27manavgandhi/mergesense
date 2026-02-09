@@ -1,3 +1,5 @@
+import type { PipelineState } from '../pipeline/state/states.js';
+
 export type InvariantSeverity = 'warn' | 'error' | 'fatal';
 
 export type InvariantID = 
@@ -10,7 +12,12 @@ export type InvariantID =
   | 'METRICS_MATCH_DECISIONS'
   | 'IDEMPOTENCY_TTL_HONORED'
   | 'REDIS_MODE_CONSISTENT'
-  | 'PIPELINE_PATH_VALID';
+  | 'PIPELINE_PATH_VALID'
+  // New state-based invariants
+  | 'STATE_AI_INVOCATION_REQUIRES_PENDING'
+  | 'STATE_COMMENT_REQUIRES_REVIEW_READY'
+  | 'STATE_TERMINAL_NO_FURTHER_TRANSITIONS'
+  | 'STATE_SILENT_EXIT_NO_AI';
 
 export interface InvariantContext {
   // Semaphore context
@@ -38,6 +45,13 @@ export interface InvariantContext {
   redisEnabled?: boolean;
   redisHealthy?: boolean;
   instanceMode?: 'single-instance' | 'distributed' | 'degraded';
+  
+  // State machine context (NEW)
+  currentState?: PipelineState;
+  previousState?: PipelineState;
+  isTerminalState?: boolean;
+  aboutToInvokeAI?: boolean;
+  aboutToPostComment?: boolean;
 }
 
 export interface InvariantDefinition {

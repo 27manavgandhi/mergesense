@@ -1,5 +1,6 @@
 import { PreCheckResult } from '../types.js';
 import type { InvariantViolation } from '../invariants/types.js';
+import type { PipelineState } from '../pipeline/state/states.js';
 
 export type DecisionPath = 
   | 'ai_review'
@@ -47,6 +48,15 @@ export interface DecisionRecord {
       severity: string;
       description: string;
     }>;
+  };
+  stateHistory?: {
+    transitions: Array<{
+      from: string;
+      to: string;
+      timestamp: string;
+    }>;
+    finalState: PipelineState;
+    totalTransitions: number;
   };
 }
 

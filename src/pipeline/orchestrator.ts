@@ -352,6 +352,159 @@ export async function processPullRequest(
         throw publishError;
       }
     }
+
+
+async function emitDecision(
+  context: PRContext,
+  reviewId: string,
+  trace: DecisionTrace,
+  startTime: number,
+  injectedFaults: string[],
+  invariantViolations: InvariantViolation[],
+  stateMachine: PipelineStateMachine
+): Promise<void> {
+  try {
+    // Check final decision consistency invariants
+    const finalViolations = safeCheckInvariants({
+      pipelinePath: trace.pipelinePath,
+      commentPosted: trace.commentPosted,
+      fallbackUsed: trace.fallbackUsed,
+      fallbackReason: trace.fallbackReason ? `${trace.fallbackReason.trigger}: ${trace.fallbackReason.details}` : undefined,
+      verdict: trace.finalVerdict,
+      currentState: stateMachine.getCurrentState(),
+      isTerminalState: stateMachine.isTerminal(),
+    }, ['PIPELINE_PATH_VALID', 'DECISION_COMMENT_CONSISTENT', 'FALLBACK_ALWAYS_EXPLAINED']);
+    
+    const allInvariantViolations = [...invariantViolations, ...finalViolations];
+    
+    // Evaluate postconditions
+    const stateHistory = stateMachine.getTransitionHistory();
+    const visitedStates = [
+      ...new Set([
+        'RECEIVED' as PipelineState,
+        ...stateHistory.map(t => t.from),
+        ...stateHistory.map(t => t.to),
+      ])
+    ];
+    
+    const postconditionContext: PostconditionContext = {
+      finalState: stateMachine.getFinalState()!,
+      isTerminal: stateMachine.isTerminal(),
+      decisionPath: trace.pipelinePath,
+      commentPosted: trace.commentPosted,
+      verdict: trace.finalVerdict,
+      aiInvoked: trace.aiInvoked,
+      aiBlocked: !trace.aiGating.allowed,
+      fallbackUsed: trace.fallbackUsed,
+      fallbackReason: trace.fallbackReason ? `${trace.fallbackReason.trigger}: ${trace.fallbackReason.details}` : undefined,
+      stateTransitions: stateHistory.map(t => ({ from: t.from, to: t.to })),
+      visitedStates,
+      totalSignals: trace.preCheckSummary.totalSignals,
+      highConfidenceSignals: trace.preCheckSummary.highConfidence,
+    };
+    
+    const postconditionResult = checkPostconditions(postconditionContext);
+    
+    // Determine formal validity
+    const formallyValid = 
+      allInvariantViolations.filter(v => v.severity === 'fatal' || v.severity === 'error').length === 0 &&
+      postconditionResult.violations.filter(v => v.severity === 'fatal' || v.severity === 'error').length === 0;
+    
+    metrics.recordFormallyValid(formallyValid);
+    
+    if (postconditionResult.violations.length > 0) {
+      metrics.recordPostconditionViolations(postconditionResult.violations);
+    }
+    
+    const decision: DecisionRecord = {
+      reviewId,
+      timestamp: new Date().toISOString(),
+      pr: {
+        owner: context.owner,
+        repo: context.repo,
+        number: context.pull_number,
+      },
+      path: trace.pipelinePath,
+      aiInvoked: trace.aiInvoked,
+      aiBlocked: !trace.aiGating.allowed,
+      aiBlockedReason: trace.aiGating.reason,
+      fallbackUsed: trace.fallbackUsed,
+      fallbackReason: trace.fallbackReason ? `${trace.fallbackReason.trigger}: ${trace.fallbackReason.details}` : undefined,
+      preCheckSummary: trace.preCheckSummary,
+      verdict: trace.finalVerdict,
+      commentPosted: trace.commentPosted,
+      processingTimeMs: Date.now() - startTime,
+      instanceMode: instanceMode(),
+      faultsInjected: injectedFaults.length > 0 ? injectedFaults : undefined,
+      invariantViolations: allInvariantViolations.length > 0 ? {
+        total: allInvariantViolations.length,
+        warn: allInvariantViolations.filter(v => v.severity === 'warn').length,
+        error: allInvariantViolations.filter(v => v.severity === 'error').length,
+        fatal: allInvariantViolations.filter(v => v.severity === 'fatal').length,
+        violations: allInvariantViolations.map(v => ({
+          invariantId: v.invariantId,
+          severity: v.severity,
+          description: v.description,
+        })),
+      } : undefined,
+      stateHistory: {
+        transitions: stateHistory.map(t => ({
+          from: t.from,
+          to: t.to,
+          timestamp: t.timestamp,
+        })),
+        finalState: stateMachine.getFinalState()!,
+        totalTransitions: stateHistory.length,
+      },
+      postconditions: {
+        totalChecked: postconditionResult.totalChecked,
+        passed: postconditionResult.passed,
+        violations: {
+          total: postconditionResult.violations.length,
+          warn: postconditionResult.violations.filter(v => v.severity === 'warn').length,
+          error: postconditionResult.violations.filter(v => v.severity === 'error').length,
+          fatal: postconditionResult.violations.filter(v => v.severity === 'fatal').length,
+          details: postconditionResult.violations.map(v => ({
+            postconditionId: v.postconditionId,
+            severity: v.severity,
+            description: v.description,
+            rationale: v.rationale,
+          })),
+        },
+      },
+      formallyValid,
+    };
+
+    await decisionHistory.append(decision);
+    
+    if (allInvariantViolations.length > 0) {
+      metrics.recordInvariantViolations(allInvariantViolations);
+    }
+    
+    logger.info('decision_recorded', 'Decision record emitted', {
+      reviewId,
+      path: trace.pipelinePath,
+      finalState: stateMachine.getFinalState(),
+      stateTransitions: stateMachine.getStateHistorySummary(),
+      processingTimeMs: decision.processingTimeMs,
+      faultsInjected: injectedFaults.length > 0 ? injectedFaults : undefined,
+      invariantViolations: allInvariantViolations.length > 0 ? allInvariantViolations.map(v => v.invariantId) : undefined,
+      postconditionsPassed: postconditionResult.passed,
+      formallyValid,
+    });
+  } catch (error) {
+    if (error instanceof FaultInjectionError) {
+      logger.warn('fault_handling', 'Decision write failed (injected), continuing', {
+        faultCode: error.faultCode,
+      });
+    } else {
+      logger.error('decision_record_error', 'Failed to emit decision record', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        reviewId,
+      });
+    }
+  }
+}
     
     await emitDecision(context, reviewId, trace, startTime, injectedFaults, invariantViolations, stateMachine);
   } catch (error) {

@@ -7,6 +7,135 @@ import type { IdempotencyStore } from '../persistence/types.js';
 import type { InvariantViolation } from '../invariants/types.js';
 import { summarizeViolations } from '../invariants/violations.js';
 
+import type { PostconditionViolation } from '../postconditions/types.js';
+import { summarizeViolations as summarizePostconditionViolations } from '../postconditions/violations.js';
+
+export interface MetricsSnapshot {
+  processStartTime: string;
+  uptimeSeconds: number;
+  redis: {
+    enabled: boolean;
+    healthy: boolean;
+    mode: 'distributed' | 'degraded' | 'single-instance';
+  };
+  prs: {
+    total: number;
+    aiInvoked: number;
+    aiSkippedSafe: number;
+    aiSkippedFiltered: number;
+    aiBlockedManual: number;
+    aiFallbackError: number;
+    aiFallbackQuality: number;
+    errorDiffExtraction: number;
+    errorSizeLimit: number;
+    loadShedPRSaturated: number;
+    loadShedAISaturated: number;
+    duplicateWebhooks: number;
+    idempotentSkipped: number;
+    formallyValid: number;
+    formallyInvalid: number;
+  };
+  ai: {
+    invocationCount: number;
+    fallbackCount: number;
+    fallbackRate: number;
+    qualityRejectionCount: number;
+    apiErrorCount: number;
+  };
+  tokens: {
+    totalInput: number;
+    totalOutput: number;
+    totalCombined: number;
+  };
+  cost: {
+    totalUSD: number;
+    averagePerAIInvocation: number;
+    averagePerPR: number;
+  };
+  concurrency: {
+    prPipelines: {
+      inFlight: number;
+      peak: number;
+      available: number;
+      waiting: number;
+    };
+    aiCalls: {
+      inFlight: number;
+      peak: number;
+      available: number;
+      waiting: number;
+    };
+  };
+  idempotency: {
+    guardSize: number;
+    guardMaxSize: number;
+    guardTTLMs: number;
+    type: 'redis' | 'memory';
+  };
+  invariants: {
+    totalViolations: number;
+    warnViolations: number;
+    errorViolations: number;
+    fatalViolations: number;
+  };
+  postconditions: {
+    totalViolations: number;
+    warnViolations: number;
+    errorViolations: number;
+    fatalViolations: number;
+  };
+}
+
+class Metrics {
+  private startTime: Date = new Date();
+  private invariantViolations: InvariantViolation[] = [];
+  private postconditionViolations: PostconditionViolation[] = [];
+  
+  private counters = {
+    prsTotal: 0,
+    prsAIInvoked: 0,
+    prsAISkippedSafe: 0,
+    prsAISkippedFiltered: 0,
+    prsAIBlockedManual: 0,
+    prsAIFallbackError: 0,
+    prsAIFallbackQuality: 0,
+    prsErrorDiffExtraction: 0,
+    prsErrorSizeLimit: 0,
+    prsLoadShedPRSaturated: 0,
+    prsLoadShedAISaturated: 0,
+    prsDuplicateWebhooks: 0,
+    prsIdempotentSkipped: 0,
+    prsFormallyValid: 0,
+    prsFormallyInvalid: 0,
+    aiInvocationCount: 0,
+    aiFallbackCount: 0,
+    aiQualityRejectionCount: 0,
+    aiAPIErrorCount: 0,
+    tokensInput: 0,
+    tokensOutput: 0,
+    costTotalUSD: 0,
+  };
+
+  incrementPRProcessed(): void {
+    this.counters.prsTotal++;
+  }
+
+  recordInvariantViolations(violations: InvariantViolation[]): void {
+    this.invariantViolations.push(...violations);
+  }
+
+  recordPostconditionViolations(violations: PostconditionViolation[]): void {
+    this.postconditionViolations.push(...violations);
+  }
+
+  recordFormallyValid(isValid: boolean): void {
+    if (isValid) {
+      this.counters.prsFormallyValid++;
+    } else {
+      this.counters.prsFormallyInvalid++;
+    }
+  }
+
 export interface MetricsSnapshot {
   processStartTime: string;
   uptimeSeconds: number;
@@ -159,6 +288,9 @@ class Metrics {
     
     const uptimeMs = Date.now() - this.startTime.getTime();
     const uptimeSeconds = Math.floor(uptimeMs / 1000);
+    const violationSummary = summarizeViolations(this.invariantViolations);
+    const postconditionSummary = summarizePostconditionViolations(this.postconditionViolations);
+
     
     const fallbackRate = this.counters.aiInvocationCount > 0
       ? this.counters.aiFallbackCount / this.counters.aiInvocationCount

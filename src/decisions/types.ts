@@ -58,6 +58,23 @@ export interface DecisionRecord {
     finalState: PipelineState;
     totalTransitions: number;
   };
+  postconditions?: {
+    totalChecked: number;
+    passed: boolean;
+    violations: {
+      total: number;
+      warn: number;
+      error: number;
+      fatal: number;
+      details: Array<{
+        postconditionId: string;
+        severity: string;
+        description: string;
+        rationale: string;
+      }>;
+    };
+  };
+  formallyValid?: boolean;
 }
 
 export interface SanitizedDecisionRecord extends Omit<DecisionRecord, 'pr'> {

@@ -15,6 +15,10 @@ import { FaultInjectionError } from '../faults/types.js';
 import { PipelineStateMachine } from './state/machine.js';
 import { safeCheckInvariants } from '../invariants/checker.js';
 import type { InvariantViolation } from '../invariants/types.js';
+
+import { checkPostconditions } from '../postconditions/checker.js';
+import type { PostconditionContext } from '../postconditions/types.js';
+
 import { 
   createDecisionTrace, 
   recordPreCheckResults, 

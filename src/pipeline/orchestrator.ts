@@ -428,6 +428,9 @@ async function emitDecision(
       },
       path: trace.pipelinePath,
       aiInvoked: trace.aiInvoked,
+      contractVersion: getContractVersion(),
+      contractHash: getContractHash(),
+      contractValid: true, // Always true if execution reached this point
       aiBlocked: !trace.aiGating.allowed,
       aiBlockedReason: trace.aiGating.reason,
       fallbackUsed: trace.fallbackUsed,

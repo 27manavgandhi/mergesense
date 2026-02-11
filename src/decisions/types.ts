@@ -75,6 +75,9 @@ export interface DecisionRecord {
     };
   };
   formallyValid?: boolean;
+  contractVersion: string;
+  contractHash: string;
+  contractValid: boolean;
 }
 
 export interface SanitizedDecisionRecord extends Omit<DecisionRecord, 'pr'> {

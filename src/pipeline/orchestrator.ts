@@ -15,6 +15,8 @@ import { FaultInjectionError } from '../faults/types.js';
 import { PipelineStateMachine } from './state/machine.js';
 import { safeCheckInvariants } from '../invariants/checker.js';
 import type { InvariantViolation } from '../invariants/types.js';
+import { getContractVersion, getContractHash } from '../contracts/registry.js';
+
 
 import { checkPostconditions } from '../postconditions/checker.js';
 import type { PostconditionContext } from '../postconditions/types.js';

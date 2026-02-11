@@ -10,9 +10,52 @@ import { initializeRedis, getRedisClient, shutdownRedis, isRedisHealthy } from '
 import { idempotencyGuard } from './idempotency/guard.js';
 import { createDecisionHistory, sanitizeDecision } from './decisions/history.js';
 import { faultController } from './faults/controller.js';
+import { initializeContract, getActiveContract } from './contracts/registry.js';
+import { enforceContract } from './contracts/validator.js';
+import { ContractMismatchError } from './contracts/types.js';
 import type { DistributedSemaphore } from './persistence/types.js';
 
 dotenv.config();
+
+// Initialize and validate execution contract FIRST
+try {
+  initializeContract();
+  enforceContract();
+  
+  const contract = getActiveContract();
+  console.log(`✓ Execution contract validated`);
+  console.log(`  Version: ${contract.version}`);
+  console.log(`  Hash: ${contract.contractHash}`);
+  console.log(`  States: ${contract.fsmSchema.stateCount}`);
+  console.log(`  Invariants: ${contract.invariantSchema.invariantCount}`);
+  console.log(`  Postconditions: ${contract.postconditionSchema.postconditionCount}`);
+} catch (error) {
+  if (error instanceof ContractMismatchError) {
+    console.error('
+❌ FATAL: Execution contract mismatch detected');
+    console.error('
+Contract validation failed. The system cannot start.');
+    console.error('
+Errors:');
+    error.errors.forEach(e => {
+      console.error(`  [${e.severity.toUpperCase()}] ${e.code}: ${e.message}`);
+      if (e.detail) {
+        console.error(`    Detail:`, JSON.stringify(e.detail, null, 2));
+      }
+    });
+    console.error('
+Expected hash:', error.expectedHash);
+    console.error('Current hash:', error.currentHash);
+    console.error('
+ACTION REQUIRED:');
+    console.error('  1. Review the errors above');
+    console.error('  2. If intentional, increment contract version in src/contracts/version.ts');
+    console.error('  3. Document the change in CONTRACT_CHANGELOG');
+    console.error('  4. If unintentional, revert the breaking changes');
+    process.exit(1);
+  }
+  throw error;
+}
 
 faultController.initialize();
 
@@ -129,8 +172,11 @@ app.get('/decisions', async (req, res) => {
 
 const server = app.listen(PORT, () => {
   const mode = redis ? 'distributed (Redis)' : 'single-instance (in-memory)';
+  const contract = getActiveContract();
+  
   console.log(`MergeSense listening on port ${PORT}`);
   console.log(`Mode: ${mode}`);
+  console.log(`Contract: ${contract.version} (${contract.contractHash})`);
   console.log(`Concurrency limits: PR pipelines=${CONCURRENCY_LIMITS.MAX_CONCURRENT_PR_PIPELINES}, AI calls=${CONCURRENCY_LIMITS.MAX_CONCURRENT_AI_CALLS}`);
   if (faultController.isEnabled()) {
     console.log('⚠️  FAULT INJECTION ENABLED - CHAOS SAFETY MODE');

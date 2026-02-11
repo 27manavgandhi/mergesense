@@ -13,6 +13,11 @@ import { summarizeViolations as summarizePostconditionViolations } from '../post
 export interface MetricsSnapshot {
   processStartTime: string;
   uptimeSeconds: number;
+  contract: {
+    version: string;
+    hash: string;
+    valid: boolean;
+  };
   redis: {
     enabled: boolean;
     healthy: boolean;
@@ -291,6 +296,16 @@ class Metrics {
     const violationSummary = summarizeViolations(this.invariantViolations);
     const postconditionSummary = summarizePostconditionViolations(this.postconditionViolations);
 
+    const contract = getActiveContract();
+  
+  return {
+    processStartTime: this.startTime.toISOString(),
+    uptimeSeconds,
+    contract: {
+      version: contract.version,
+      hash: contract.contractHash,
+      valid: true, // Would be false if contract validation failed at startup
+    },
     
     const fallbackRate = this.counters.aiInvocationCount > 0
       ? this.counters.aiFallbackCount / this.counters.aiInvocationCount

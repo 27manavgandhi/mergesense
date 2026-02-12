@@ -16,6 +16,9 @@ import { PipelineStateMachine } from './state/machine.js';
 import { safeCheckInvariants } from '../invariants/checker.js';
 import type { InvariantViolation } from '../invariants/types.js';
 import { getContractVersion, getContractHash } from '../contracts/registry.js';
+import { generateExecutionProofHash } from '../attestation/hasher.js';
+import { ProofGenerationError } from '../attestation/types.js';
+import type { ExecutionProofInput } from '../attestation/types.js';
 
 
 import { checkPostconditions } from '../postconditions/checker.js';

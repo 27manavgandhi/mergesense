@@ -14,6 +14,8 @@ import { initializeContract, getActiveContract } from './contracts/registry.js';
 import { enforceContract } from './contracts/validator.js';
 import { ContractMismatchError } from './contracts/types.js';
 import type { DistributedSemaphore } from './persistence/types.js';
+import { verifyDecisionProof } from './attestation/verifier.js';
+import { ProofVerificationError } from './attestation/types.js';
 
 dotenv.config();
 

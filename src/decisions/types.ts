@@ -78,6 +78,9 @@ export interface DecisionRecord {
   contractVersion: string;
   contractHash: string;
   contractValid: boolean;
+  executionProofHash: string;
+  executionProofAlgorithm: 'sha256-v1';
+  sealed: boolean;
 }
 
 export interface SanitizedDecisionRecord extends Omit<DecisionRecord, 'pr'> {

@@ -93,6 +93,71 @@ export function instanceMode(): 'single-instance' | 'distributed' | 'degraded' {
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+app.get('/verify/:reviewId', async (req, res) => {
+  const { reviewId } = req.params;
+  
+  try {
+    logger.info('proof_verification_request', 'Verifying execution proof', {
+      reviewId,
+    });
+    
+    // Find decision in history
+    const decisions = await decisionHistory.getRecent(100);
+    const decision = decisions.find(d => d.reviewId === reviewId);
+    
+    if (!decision) {
+      return res.status(404).json({
+        error: 'Decision not found',
+        reviewId,
+      });
+    }
+    
+    // Verify proof
+    const verificationResult = verifyDecisionProof(decision);
+    
+    if (!verificationResult.valid) {
+      logger.warn('proof_verification_failed', 'Execution proof verification failed', {
+        reviewId,
+        reason: verificationResult.reason,
+      });
+      
+      return res.status(409).json({
+        ...verificationResult,
+        error: 'Proof verification failed',
+      });
+    }
+    
+    logger.info('proof_verification_success', 'Execution proof verified', {
+      reviewId,
+    });
+    
+    return res.status(200).json(verificationResult);
+    
+  } catch (error) {
+    if (error instanceof ProofVerificationError) {
+      logger.error('proof_verification_error', 'Proof verification error', {
+        reviewId: error.reviewId,
+        error: error.message,
+      });
+      
+      return res.status(500).json({
+        error: 'Proof verification error',
+        reviewId: error.reviewId,
+        message: error.message,
+      });
+    }
+    
+    logger.error('verify_endpoint_error', 'Unexpected error in verify endpoint', {
+      reviewId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+    
+    return res.status(500).json({
+      error: 'Internal server error',
+      reviewId,
+    });
+  }
+});
 
 app.use(express.json());
 

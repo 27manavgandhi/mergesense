@@ -391,6 +391,182 @@ async function emitDecision(
         ...stateHistory.map(t => t.to),
       ])
     ];
+
+    const formallyValid = 
+      allInvariantViolations.filter(v => v.severity === 'fatal' || v.severity === 'error').length === 0 &&
+      postconditionResult.violations.filter(v => v.severity === 'fatal' || v.severity === 'error').length === 0;
+    
+    metrics.recordFormallyValid(formallyValid);
+    
+    if (postconditionResult.violations.length > 0) {
+      metrics.recordPostconditionViolations(postconditionResult.violations);
+    }
+    
+    // Build decision record (without proof yet)
+    const baseDecision = {
+      reviewId,
+      timestamp: new Date().toISOString(),
+      pr: {
+        owner: context.owner,
+        repo: context.repo,
+        number: context.pull_number,
+      },
+      path: trace.pipelinePath,
+      aiInvoked: trace.aiInvoked,
+      aiBlocked: !trace.aiGating.allowed,
+      aiBlockedReason: trace.aiGating.reason,
+      fallbackUsed: trace.fallbackUsed,
+      fallbackReason: trace.fallbackReason ? `${trace.fallbackReason.trigger}: ${trace.fallbackReason.details}` : undefined,
+      preCheckSummary: trace.preCheckSummary,
+      verdict: trace.finalVerdict,
+      commentPosted: trace.commentPosted,
+      processingTimeMs: Date.now() - startTime,
+      instanceMode: instanceMode(),
+      faultsInjected: injectedFaults.length > 0 ? injectedFaults : undefined,
+      invariantViolations: allInvariantViolations.length > 0 ? {
+        total: allInvariantViolations.length,
+        warn: allInvariantViolations.filter(v => v.severity === 'warn').length,
+        error: allInvariantViolations.filter(v => v.severity === 'error').length,
+        fatal: allInvariantViolations.filter(v => v.severity === 'fatal').length,
+        violations: allInvariantViolations.map(v => ({
+          invariantId: v.invariantId,
+          severity: v.severity,
+          description: v.description,
+        })),
+      } : undefined,
+      stateHistory: {
+        transitions: stateHistory.map(t => ({
+          from: t.from,
+          to: t.to,
+          timestamp: t.timestamp,
+        })),
+        finalState: stateMachine.getFinalState()!,
+        totalTransitions: stateHistory.length,
+      },
+      postconditions: {
+        totalChecked: postconditionResult.totalChecked,
+        passed: postconditionResult.passed,
+        violations: {
+          total: postconditionResult.violations.length,
+          warn: postconditionResult.violations.filter(v => v.severity === 'warn').length,
+          error: postconditionResult.violations.filter(v => v.severity === 'error').length,
+          fatal: postconditionResult.violations.filter(v => v.severity === 'fatal').length,
+          details: postconditionResult.violations.map(v => ({
+            postconditionId: v.postconditionId,
+            severity: v.severity,
+            description: v.description,
+            rationale: v.rationale,
+          })),
+        },
+      },
+      formallyValid,
+      contractVersion: getContractVersion(),
+      contractHash: getContractHash(),
+      contractValid: true,
+    };
+    
+    // Generate execution proof
+    try {
+      const proofInput: ExecutionProofInput = {
+        contractHash: baseDecision.contractHash,
+        contractVersion: baseDecision.contractVersion,
+        reviewId: baseDecision.reviewId,
+        prOwner: baseDecision.pr.owner,
+        prRepo: baseDecision.pr.repo,
+        prNumber: baseDecision.pr.number,
+        decisionPath: baseDecision.path,
+        invariantViolations: {
+          total: baseDecision.invariantViolations?.total || 0,
+          warn: baseDecision.invariantViolations?.warn || 0,
+          error: baseDecision.invariantViolations?.error || 0,
+          fatal: baseDecision.invariantViolations?.fatal || 0,
+          violationIds: baseDecision.invariantViolations?.violations.map(v => v.invariantId) || [],
+        },
+        stateTransitions: baseDecision.stateHistory.transitions.map(t => ({
+          from: t.from,
+          to: t.to,
+        })),
+        finalState: baseDecision.stateHistory.finalState,
+        postconditionResults: {
+          totalChecked: baseDecision.postconditions.totalChecked,
+          passed: baseDecision.postconditions.passed,
+          violationCount: baseDecision.postconditions.violations.total,
+          violationIds: baseDecision.postconditions.violations.details.map(v => v.postconditionId),
+        },
+        verdict: baseDecision.verdict,
+        processingTimeMs: baseDecision.processingTimeMs,
+        aiInvoked: baseDecision.aiInvoked,
+        fallbackUsed: baseDecision.fallbackUsed,
+        commentPosted: baseDecision.commentPosted,
+        timestamp: baseDecision.timestamp,
+      };
+      
+      const executionProofHash = generateExecutionProofHash(proofInput);
+      
+      logger.info('execution_proof_generated', 'Cryptographic execution proof generated', {
+        reviewId,
+        proofHash: executionProofHash,
+        algorithm: 'sha256-v1',
+      });
+      
+      // Create sealed decision record
+      const decision: DecisionRecord = {
+        ...baseDecision,
+        executionProofHash,
+        executionProofAlgorithm: 'sha256-v1',
+        sealed: true,
+      };
+      
+      await decisionHistory.append(decision);
+      
+      if (allInvariantViolations.length > 0) {
+        metrics.recordInvariantViolations(allInvariantViolations);
+      }
+      
+      logger.info('decision_recorded', 'Decision record emitted and sealed', {
+        reviewId,
+        path: trace.pipelinePath,
+        finalState: stateMachine.getFinalState(),
+        stateTransitions: stateMachine.getStateHistorySummary(),
+        processingTimeMs: decision.processingTimeMs,
+        faultsInjected: injectedFaults.length > 0 ? injectedFaults : undefined,
+        invariantViolations: allInvariantViolations.length > 0 ? allInvariantViolations.map(v => v.invariantId) : undefined,
+        postconditionsPassed: postconditionResult.passed,
+        formallyValid,
+        sealed: true,
+        proofHash: executionProofHash,
+      });
+      
+    } catch (proofError) {
+      logger.error('proof_generation_failed', 'Failed to generate execution proof', {
+        reviewId,
+        error: proofError instanceof Error ? proofError.message : 'Unknown error',
+      });
+      
+      throw new ProofGenerationError(
+        `Execution proof generation failed: ${proofError instanceof Error ? proofError.message : 'Unknown error'}`,
+        reviewId
+      );
+    }
+    
+  } catch (error) {
+    if (error instanceof FaultInjectionError) {
+      logger.warn('fault_handling', 'Decision write failed (injected), continuing', {
+        faultCode: error.faultCode,
+      });
+    } else if (error instanceof ProofGenerationError) {
+      logger.error('proof_generation_fatal', 'Execution failed due to proof generation error', {
+        reviewId: error.reviewId,
+      });
+      throw error;
+    } else {
+      logger.error('decision_record_error', 'Failed to emit decision record', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        reviewId,
+      });
+    }
+  }
+}
     
     const postconditionContext: PostconditionContext = {
       finalState: stateMachine.getFinalState()!,

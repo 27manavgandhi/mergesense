@@ -20,6 +20,9 @@ import { generateExecutionProofHash } from '../attestation/hasher.js';
 import { ProofGenerationError } from '../attestation/types.js';
 import type { ExecutionProofInput } from '../attestation/types.js';
 
+import { ledgerManager } from '../ledger/ledger-manager.js';
+import { LedgerGenerationError } from '../ledger/ledger-types.js';
+
 
 import { checkPostconditions } from '../postconditions/checker.js';
 import type { PostconditionContext } from '../postconditions/types.js';

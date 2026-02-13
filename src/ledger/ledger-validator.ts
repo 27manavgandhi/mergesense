@@ -1,6 +1,8 @@
 import type { DecisionRecord } from '../decisions/types.js';
 import { generateLedgerHash } from './ledger-hasher.js';
 import type { LedgerVerificationResult } from './ledger-types.js';
+import { logger } from '../observability/logger.js';
+
 
 
 export function verifyLedgerChain(decisions: DecisionRecord[]): LedgerVerificationResult {

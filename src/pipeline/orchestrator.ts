@@ -600,6 +600,84 @@ async function emitDecision(
       metrics.recordPostconditionViolations(postconditionResult.violations);
     }
     
+    // Generate ledger entry
+    let ledgerEntry;
+    try {
+      ledgerEntry = ledgerManager.generateLedgerEntry(
+        executionProofHash,
+        baseDecision.reviewId,
+        baseDecision.timestamp
+      );
+      
+      logger.info('ledger_entry_created', 'Ledger entry linked to chain', {
+        reviewId,
+        previousHash: ledgerEntry.previousLedgerHash,
+        ledgerHash: ledgerEntry.ledgerHash,
+      });
+      
+    } catch (ledgerError) {
+      logger.error('ledger_generation_failed', 'Failed to generate ledger entry', {
+        reviewId,
+        error: ledgerError instanceof Error ? ledgerError.message : 'Unknown error',
+      });
+      
+      throw new LedgerGenerationError(
+        `Ledger entry generation failed: ${ledgerError instanceof Error ? ledgerError.message : 'Unknown error'}`,
+        reviewId
+      );
+    }
+    
+    // Create sealed decision record with ledger linkage
+    const decision: DecisionRecord = {
+      ...baseDecision,
+      executionProofHash,
+      executionProofAlgorithm: 'sha256-v1',
+      sealed: true,
+      ledgerHash: ledgerEntry.ledgerHash,
+      previousLedgerHash: ledgerEntry.previousLedgerHash,
+      ledgerAlgorithm: 'sha256-ledger-v1',
+    };
+    
+    await decisionHistory.append(decision);
+    logger.info('decision_recorded', 'Decision record emitted, sealed, and chained', {
+      reviewId,
+      path: trace.pipelinePath,
+      finalState: stateMachine.getFinalState(),
+      stateTransitions: stateMachine.getStateHistorySummary(),
+      processingTimeMs: decision.processingTimeMs,
+      faultsInjected: injectedFaults.length > 0 ? injectedFaults : undefined,
+      invariantViolations: allInvariantViolations.length > 0 ? allInvariantViolations.map(v => v.invariantId) : undefined,
+      postconditionsPassed: postconditionResult.passed,
+      formallyValid,
+      sealed: true,
+      proofHash: executionProofHash,
+      ledgerHash: ledgerEntry.ledgerHash,
+      previousLedgerHash: ledgerEntry.previousLedgerHash,
+    });
+    
+  } catch (error) {
+    if (error instanceof FaultInjectionError) {
+      logger.warn('fault_handling', 'Decision write failed (injected), continuing', {
+        faultCode: error.faultCode,
+      });
+    } else if (error instanceof ProofGenerationError) {
+      logger.error('proof_generation_fatal', 'Execution failed due to proof generation error', {
+        reviewId: error.reviewId,
+      });
+      throw error;
+    } else if (error instanceof LedgerGenerationError) {
+      logger.error('ledger_generation_fatal', 'Execution failed due to ledger generation error', {
+        reviewId: error.reviewId,
+      });
+      throw error;
+    } else {
+      logger.error('decision_record_error', 'Failed to emit decision record', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        reviewId,
+      });
+    }
+  }
+}
     const decision: DecisionRecord = {
       reviewId,
       timestamp: new Date().toISOString(),

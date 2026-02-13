@@ -81,6 +81,9 @@ export interface DecisionRecord {
   executionProofHash: string;
   executionProofAlgorithm: 'sha256-v1';
   sealed: boolean;
+  ledgerHash: string;
+  previousLedgerHash: string;
+  ledgerAlgorithm: 'sha256-ledger-v1';
 }
 
 export interface SanitizedDecisionRecord extends Omit<DecisionRecord, 'pr'> {

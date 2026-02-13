@@ -1,6 +1,8 @@
 import { generateLedgerHash } from './ledger-hasher.js';
 import { logger } from '../observability/logger.js';
 import type { LedgerEntry, LedgerEntryInput } from './ledger-types.js';
+import { LedgerGenerationError } from './ledger-types.js';
+
 
 export class LedgerManager {
   private lastLedgerHash: string = 'GENESIS';

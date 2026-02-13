@@ -3,6 +3,7 @@ import { getRedisClient, isRedisHealthy } from '../persistence/redis-client.js';
 import { logger } from '../observability/logger.js';
 import { maybeInjectFault } from '../faults/injector.js';
 import { FaultInjectionError } from '../faults/types.js';
+import { ledgerManager } from '../ledger/ledger-manager.js';
 
 const MAX_IN_MEMORY_DECISIONS = 100;
 const MAX_REDIS_DECISIONS = 500;
@@ -32,6 +33,10 @@ class InMemoryDecisionHistory {
       maxSize: MAX_IN_MEMORY_DECISIONS,
       type: 'memory',
     };
+  }
+
+  initializeLedger(): void {
+    ledgerManager.initializeFromHistory(this.decisions);
   }
 }
 
@@ -97,6 +102,11 @@ class RedisDecisionHistory {
       return { count: 0, maxSize: MAX_REDIS_DECISIONS, type: 'redis' };
     }
   }
+
+  async initializeLedger(): Promise<void> {
+    const decisions = await this.getRecent(MAX_REDIS_DECISIONS);
+    ledgerManager.initializeFromHistory(decisions.reverse()); // Reverse to get chronological order
+  }
 }
 
 class HybridDecisionHistory {
@@ -144,6 +154,14 @@ class HybridDecisionHistory {
       return await this.redis.getStats();
     }
     return this.inMemory.getStats();
+  }
+
+  async initializeLedger(): Promise<void> {
+    if (this.useRedis && isRedisHealthy()) {
+      await this.redis.initializeLedger();
+    } else {
+      this.inMemory.initializeLedger();
+    }
   }
 }
 

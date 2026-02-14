@@ -16,6 +16,11 @@ import { ContractMismatchError } from './contracts/types.js';
 import type { DistributedSemaphore } from './persistence/types.js';
 import { verifyDecisionProof } from './attestation/verifier.js';
 import { ProofVerificationError } from './attestation/types.js';
+import { getMerkleRoot } from './merkle/merkle-builder.js';
+import { generateMerkleProof } from './merkle/merkle-proof.js';
+import { verifyMerkleProofRequest } from './merkle/merkle-validator.js';
+import { MerkleTreeError } from './merkle/merkle-types.js';
+import type { MerkleVerificationRequest } from './merkle/merkle-types.js';
 
 dotenv.config();
 

@@ -164,6 +164,185 @@ app.get('/verify/:reviewId', async (req, res) => {
   }
 });
 
+app.get('/merkle/root', async (_req, res) => {
+  try {
+    logger.info('merkle_root_request', 'Computing Merkle root');
+    
+    // Get all decisions
+    const decisions = await decisionHistory.getRecent(1000);
+    
+    if (decisions.length === 0) {
+      return res.status(404).json({
+        error: 'No decisions available',
+        reason: 'Cannot compute Merkle root from empty decision set',
+      });
+    }
+    
+    // Extract execution proof hashes in chronological order (oldest first)
+    const chronological = [...decisions].reverse();
+    const leafHashes = chronological.map(d => d.executionProofHash);
+    
+    // Compute Merkle root
+    const root = getMerkleRoot(leafHashes);
+    
+    logger.info('merkle_root_computed', 'Merkle root computed', {
+      root: root.substring(0, 16) + '...',
+      leafCount: leafHashes.length,
+    });
+    
+    return res.status(200).json({
+      root,
+      leafCount: leafHashes.length,
+      algorithm: 'sha256-merkle-v1',
+    });
+    
+  } catch (error) {
+    if (error instanceof MerkleTreeError) {
+      logger.error('merkle_root_error', 'Merkle root computation error', {
+        error: error.message,
+      });
+      
+      return res.status(400).json({
+        error: 'Merkle root computation failed',
+        message: error.message,
+      });
+    }
+    
+    logger.error('merkle_root_endpoint_error', 'Unexpected error in merkle root endpoint', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+    
+    return res.status(500).json({
+      error: 'Internal server error',
+    });
+  }
+});
+
+app.get('/merkle/proof/:reviewId', async (req, res) => {
+  const { reviewId } = req.params;
+  
+  try {
+    logger.info('merkle_proof_request', 'Generating Merkle proof', {
+      reviewId,
+    });
+    
+    // Get all decisions
+    const decisions = await decisionHistory.getRecent(1000);
+    
+    if (decisions.length === 0) {
+      return res.status(404).json({
+        error: 'No decisions available',
+        reviewId,
+      });
+    }
+    
+    // Find decision index (chronological order)
+    const chronological = [...decisions].reverse();
+    const index = chronological.findIndex(d => d.reviewId === reviewId);
+    
+    if (index === -1) {
+      return res.status(404).json({
+        error: 'Decision not found',
+        reviewId,
+      });
+    }
+    
+    const decision = chronological[index];
+    
+    // Extract execution proof hashes
+    const leafHashes = chronological.map(d => d.executionProofHash);
+    
+    // Generate proof
+    const proof = generateMerkleProof(leafHashes, index);
+    
+    // Compute root
+    const root = getMerkleRoot(leafHashes);
+    
+    logger.info('merkle_proof_generated', 'Merkle proof generated', {
+      reviewId,
+      proofSteps: proof.length,
+      root: root.substring(0, 16) + '...',
+    });
+    
+    return res.status(200).json({
+      reviewId,
+      executionProofHash: decision.executionProofHash,
+      proof,
+      root,
+      algorithm: 'sha256-merkle-v1',
+    });
+    
+  } catch (error) {
+    if (error instanceof MerkleTreeError) {
+      logger.error('merkle_proof_error', 'Merkle proof generation error', {
+        reviewId,
+        error: error.message,
+      });
+      
+      return res.status(400).json({
+        error: 'Merkle proof generation failed',
+        reviewId,
+        message: error.message,
+      });
+    }
+    
+    logger.error('merkle_proof_endpoint_error', 'Unexpected error in merkle proof endpoint', {
+      reviewId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+    
+    return res.status(500).json({
+      error: 'Internal server error',
+      reviewId,
+    });
+  }
+});
+
+app.post('/merkle/verify', async (req, res) => {
+  try {
+    const request: MerkleVerificationRequest = req.body;
+    
+    if (!request.leafHash || !request.proof || !request.root) {
+      return res.status(400).json({
+        error: 'Invalid request',
+        reason: 'Missing required fields: leafHash, proof, root',
+      });
+    }
+    
+    logger.info('merkle_verify_request', 'Verifying Merkle proof', {
+      leafHash: request.leafHash.substring(0, 16) + '...',
+      proofSteps: request.proof.length,
+      root: request.root.substring(0, 16) + '...',
+    });
+    
+    // Verify proof
+    const result = verifyMerkleProofRequest(request);
+    
+    if (!result.valid) {
+      logger.warn('merkle_verify_failed', 'Merkle proof verification failed', {
+        reason: result.reason,
+      });
+      
+      return res.status(409).json({
+        ...result,
+        error: 'Proof verification failed',
+      });
+    }
+    
+    logger.info('merkle_verify_success', 'Merkle proof verified successfully');
+    
+    return res.status(200).json(result);
+    
+  } catch (error) {
+    logger.error('merkle_verify_endpoint_error', 'Unexpected error in merkle verify endpoint', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+    
+    return res.status(500).json({
+      error: 'Internal server error',
+    });
+  }
+});
 app.use(express.json());
 
 app.post('/webhook', async (req, res, next) => {

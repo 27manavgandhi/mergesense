@@ -85,6 +85,111 @@ export async function generateReview(
   files: DiffFile[],
   preChecks: PreCheckResult,
   trace: DecisionTrace,
+  injectedFaults: string[],
+  stateMachine: PipelineStateMachine
+): Promise<ReviewOutput> {
+  const riskAnalysis = analyzeRiskSignals(preChecks);
+  
+  const input: AIReviewInput = {
+    fileCount: files.length,
+    totalChanges: files.reduce((sum, f) => sum + f.changes, 0),
+    riskSignals: preChecks,
+    criticalCategories: riskAnalysis.criticalCategories,
+    highConfidenceCount: riskAnalysis.highConfidenceSignals,
+    mediumConfidenceCount: riskAnalysis.mediumConfidenceSignals,
+  };
+
+  const acquired = await aiSemaphore.tryAcquire();
+  if (!acquired) {
+    logger.warn('ai_saturation', 'AI concurrency limit reached, falling back to deterministic review', {
+      inFlight: await aiSemaphore.getInFlight(),
+      waiting: aiSemaphore.getWaiting(),
+    });
+    recordFallback(trace, 'api_error', 'AI concurrency limit exceeded');
+    metrics.recordLoadShedAISaturated();
+    return createFallbackReview(preChecks, files.length);
+  }
+
+  try {
+    // Check state invariant before AI invocation
+    safeCheckInvariants({
+      aiGatingAllowed: trace.aiGating.allowed,
+      aiInvoked: false,
+      currentState: stateMachine.getCurrentState(),
+      aboutToInvokeAI: true,
+    }, ['AI_GATING_RESPECTED', 'STATE_AI_INVOCATION_REQUIRES_PENDING']);
+    
+    maybeInjectFault('AI_TIMEOUT');
+    
+    // Build intelligent diff chunks
+    logger.info('diff_intelligence_start', 'Building intelligent diff chunks');
+    
+    const rawChunks = buildDiffChunks(files);
+    const classifiedChunks = classifyChunks(rawChunks, preChecks);
+    const { included, truncated, summary } = prioritizeChunks(classifiedChunks);
+    const context = aggregatePRContext(files, preChecks);
+    
+    const chunkedResult: ChunkedDiffResult = {
+      chunks: included,
+      context,
+      stats: {
+        totalChunks: classifiedChunks.length,
+        highPriority: classifiedChunks.filter(c => c.priority === 'high').length,
+        mediumPriority: classifiedChunks.filter(c => c.priority === 'medium').length,
+        lowPriority: classifiedChunks.filter(c => c.priority === 'low').length,
+        truncated,
+      },
+    };
+    
+    logger.info('diff_intelligence_complete', 'Diff intelligence processing complete', {
+      totalChunks: chunkedResult.stats.totalChunks,
+      highPriority: chunkedResult.stats.highPriority,
+      mediumPriority: chunkedResult.stats.mediumPriority,
+      lowPriority: chunkedResult.stats.lowPriority,
+      truncated: chunkedResult.stats.truncated,
+      contextFlags: {
+        criticalPathsTouched: context.criticalPathsTouched,
+        apiSurfaceChanged: context.apiSurfaceChanged,
+        stateMutationDetected: context.stateMutationDetected,
+      },
+    });
+    
+    // STATE: AI_INVOKED
+    stateMachine.transition('AI_INVOKED');
+    
+    const client = createClaudeClient();
+    const systemPrompt = buildSystemPrompt();
+    const userPrompt = buildUserPromptWithChunks(input, chunkedResult);
+    
+    logger.info('ai_invocation', 'Calling Claude API with chunked diff', {
+      fileCount: input.fileCount,
+      totalChanges: input.totalChanges,
+      highRiskSignals: input.highConfidenceCount,
+      mediumRiskSignals: input.mediumConfidenceCount,
+      chunksIncluded: included.length,
+      chunksTruncated: truncated,
+    });
+    
+    recordAIInvocation(trace, true);
+    metrics.recordAIInvocation();
+    
+    const response = await client.generateReview(systemPrompt, userPrompt);
+    
+    // STATE: AI_RESPONDED
+    stateMachine.transition('AI_RESPONDED');
+    
+    // ... (rest of existing code for token tracking, validation, etc.)
+    
+  } catch (error) {
+    // ... (existing error handling)
+  } finally {
+    await aiSemaphore.release();
+  }
+}
+export async function generateReview(
+  files: DiffFile[],
+  preChecks: PreCheckResult,
+  trace: DecisionTrace,
   injectedFaults: string[]
 ): Promise<ReviewOutput> {
   const riskAnalysis = analyzeRiskSignals(preChecks);

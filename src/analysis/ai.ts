@@ -13,6 +13,12 @@ import { maybeInjectFault, isFaultEnabled } from '../faults/injector.js';
 import { FaultInjectionError } from '../faults/types.js';
 import type { DecisionTrace } from './decision-trace.js';
 import { safeCheckInvariants } from '../invariants/checker.js';
+import { buildDiffChunks } from './diff-intelligence/chunk-builder.js';
+import { classifyChunks } from './diff-intelligence/chunk-classifier.js';
+import { prioritizeChunks } from './diff-intelligence/chunk-prioritizer.js';
+import { aggregatePRContext } from './diff-intelligence/context-aggregator.js';
+import { buildUserPromptWithChunks } from './prompts/review-prompt.js';
+import type { ChunkedDiffResult } from './diff-intelligence/chunk-types.js';
 
 function validateAIResponse(response: unknown): AIReviewOutput {
   const errors: AIValidationError[] = [];

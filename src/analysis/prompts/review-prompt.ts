@@ -1,89 +1,119 @@
-import { AIReviewInput } from '../ai-types.js';
+import type { AIReviewInput } from '../ai-types.js';
+import type { ChunkedDiffResult } from '../diff-intelligence/chunk-types.js';
 
 export function buildSystemPrompt(): string {
-  return `You are MergeSense, an elite Staff/Principal Software Engineer with 10+ years of production experience.
+  return `You are an expert code reviewer analyzing a GitHub pull request.
 
-You review pull requests as if you will be personally accountable for this code in production.
+Your role is to:
+1. Identify potential bugs, security issues, and design problems
+2. Assess architectural implications
+3. Evaluate error handling and edge cases
+4. Consider performance and scalability
+5. Provide actionable, specific recommendations
 
-Your role:
-- Evaluate engineering judgment, not style
-- Focus on correctness, failure modes, and long-term maintainability
-- Identify hidden risks and unstated assumptions
-- Assess trade-offs made (explicitly or implicitly)
+Focus on substantive issues. Ignore style preferences and minor formatting.
 
-You must NEVER:
-- Comment on formatting, naming, or style
-- Suggest changes without explaining why
-- Praise code without justification
-- Invent issues that are not logically sound
-
-Respond ONLY in valid JSON matching this exact structure:
+Respond ONLY with valid JSON in this exact format:
 {
-  "assessment": "Concise overall evaluation in 1-2 sentences",
-  "risks": ["Risk 1 with specific impact", "Risk 2 with conditions"],
-  "assumptions": ["Assumption 1 the code relies on", "Assumption 2"],
-  "tradeoffs": ["What was optimized vs what was sacrificed"],
-  "failureModes": ["What breaks under load/failure/misuse"],
-  "recommendations": ["Specific actionable recommendation"],
-  "verdict": "safe" | "safe_with_conditions" | "requires_changes" | "high_risk"
+  "assessment": "2-3 sentence summary",
+  "risks": ["specific risk 1", "specific risk 2"],
+  "assumptions": ["assumption 1", "assumption 2"],
+  "tradeoffs": ["tradeoff 1", "tradeoff 2"],
+  "failureModes": ["failure mode 1", "failure mode 2"],
+  "recommendations": ["recommendation 1", "recommendation 2"],
+  "verdict": "safe|safe_with_conditions|requires_changes|high_risk"
 }
 
-Rules:
-- Keep arrays concise (max 5 items each)
-- Be specific, not generic
-- Explain WHY, not just WHAT
-- If a section has nothing meaningful, use empty array
-- verdict must be one of the four exact strings shown`;
+Do not include any text outside the JSON structure.`;
 }
 
 export function buildUserPrompt(input: AIReviewInput): string {
-  const riskSummary = formatRiskSignals(input);
-  
-  return `Review this pull request based on deterministic pre-check analysis.
+  return `Analyze this pull request:
 
-**PR Metrics:**
-- Files changed: ${input.fileCount}
-- Total changes: ${input.totalChanges}
-- High-confidence risk signals: ${input.highConfidenceCount}
-- Medium-confidence risk signals: ${input.mediumConfidenceCount}
+FILES: ${input.fileCount} files, ${input.totalChanges} changes
+RISK SIGNALS: ${input.highConfidenceCount} high-confidence, ${input.mediumConfidenceCount} medium-confidence
 
-**Critical Risk Categories Detected:**
-${input.criticalCategories.length > 0 ? input.criticalCategories.map(c => `- ${c}`).join('\n') : 'None'}
+CRITICAL RISK CATEGORIES:
+${input.criticalCategories.length > 0 ? input.criticalCategories.join(', ') : 'None'}
 
-**Detailed Risk Signals:**
-${riskSummary}
+Pre-check signals detected:
+- Security: ${input.riskSignals.security.length}
+- Persistence: ${input.riskSignals.persistence.length}
+- Concurrency: ${input.riskSignals.concurrency.length}
+- State Mutation: ${input.riskSignals.stateMutation.length}
+- Error Handling: ${input.riskSignals.errorHandling.length}
 
-Based on this analysis, provide your engineering review as JSON.
-
-Remember:
-- Focus on what could go wrong in production
-- Identify assumptions that aren't documented
-- Explain trade-offs clearly
-- Be specific about failure modes
-- No style feedback`;
+Provide your analysis as JSON.`;
 }
 
-function formatRiskSignals(input: AIReviewInput): string {
-  const lines: string[] = [];
-  
-  const entries = Object.entries(input.riskSignals);
-  
-  for (const [category, signal] of entries) {
-    if (!signal.detected) continue;
-    
-    lines.push(`\n**${category}** (confidence: ${signal.confidence})`);
-    
-    if (signal.locations.length > 0) {
-      lines.push(`Files: ${signal.locations.slice(0, 3).join(', ')}`);
-    }
-    
-    if (signal.details.length > 0) {
-      lines.push(`Examples:`);
-      signal.details.slice(0, 2).forEach(detail => {
-        lines.push(`  - ${detail}`);
-      });
+export function buildUserPromptWithChunks(
+  input: AIReviewInput,
+  chunked: ChunkedDiffResult
+): string {
+  const { chunks, context, stats } = chunked;
+
+  let prompt = `Analyze this pull request:
+
+FILES: ${input.fileCount} files, ${input.totalChanges} changes
+RISK SIGNALS: ${input.highConfidenceCount} high-confidence, ${input.mediumConfidenceCount} medium-confidence
+
+PR CONTEXT:
+- Modified modules: ${context.modifiedModules.join(', ') || 'None'}
+- New dependencies: ${context.newDependencies.join(', ') || 'None'}
+- Critical paths touched: ${context.criticalPathsTouched ? 'YES' : 'No'}
+- Security-sensitive files: ${context.securitySensitiveFiles.length > 0 ? context.securitySensitiveFiles.join(', ') : 'None'}
+- API surface changed: ${context.apiSurfaceChanged ? 'YES' : 'No'}
+- State mutation detected: ${context.stateMutationDetected ? 'YES' : 'No'}
+
+CHUNK DISTRIBUTION:
+- Total chunks: ${stats.totalChunks}
+- High priority: ${stats.highPriority}
+- Medium priority: ${stats.mediumPriority}
+- Low priority: ${stats.lowPriority}
+- Truncated: ${stats.truncated}
+
+`;
+
+  // High priority changes
+  const highChunks = chunks.filter(c => c.priority === 'high');
+  if (highChunks.length > 0) {
+    prompt += `\nHIGH PRIORITY CHANGES (${highChunks.length}):\n`;
+    for (const chunk of highChunks) {
+      prompt += `\n[${chunk.filePath}] (risk: ${chunk.riskScore}, category: ${chunk.category})\n`;
+      prompt += `+${chunk.linesAdded} -${chunk.linesRemoved}\n`;
+      prompt += `${chunk.code}\n`;
     }
   }
-  
-  return lines.length > 0 ? lines.join('\n') : 'No specific risk signals detected';
+
+  // Medium priority changes
+  const mediumChunks = chunks.filter(c => c.priority === 'medium');
+  if (mediumChunks.length > 0) {
+    prompt += `\nMEDIUM PRIORITY CHANGES (${mediumChunks.length}):\n`;
+    for (const chunk of mediumChunks) {
+      prompt += `\n[${chunk.filePath}] (risk: ${chunk.riskScore}, category: ${chunk.category})\n`;
+      prompt += `+${chunk.linesAdded} -${chunk.linesRemoved}\n`;
+      prompt += `${chunk.code}\n`;
+    }
+  }
+
+  // Low priority changes (limited)
+  const lowChunks = chunks.filter(c => c.priority === 'low');
+  if (lowChunks.length > 0) {
+    prompt += `\nLOW PRIORITY CHANGES (showing ${lowChunks.length}):\n`;
+    for (const chunk of lowChunks) {
+      prompt += `\n[${chunk.filePath}] (risk: ${chunk.riskScore}, category: ${chunk.category})\n`;
+      prompt += `+${chunk.linesAdded} -${chunk.linesRemoved}\n`;
+    }
+  }
+
+  if (stats.truncated > 0) {
+    prompt += `\nNOTE: ${stats.truncated} low-priority chunks omitted for token efficiency.\n`;
+  }
+
+  prompt += `\nREVIEW INSTRUCTIONS:
+Focus on high-priority changes. Consider the PR context. Identify substantive risks.
+
+Provide your analysis as JSON.`;
+
+  return prompt;
 }

@@ -51,6 +51,388 @@ Review Generated (AI or fallback)
 Single Comment Posted to PR
 
 ```
+## Day 22: Weighted Risk Scoring Engine (Composite PR Risk Intelligence)
+
+### What Changed
+
+**Before (Day 21):**
+- Qualitative AI review
+- Binary gating (allow/block)
+- No quantitative risk aggregation
+- Chunk-level risk scores only
+
+**After (Day 22):**
+- Deterministic composite PR risk score
+- Weighted multi-dimension model
+- Confidence measurement
+- Quantitative classification (LOW/MEDIUM/HIGH/CRITICAL)
+- Explainable numeric scoring
+
+### Why Composite Risk Scoring?
+
+**Current state (Day 21):**
+- AI provides qualitative verdict ("safe", "requires_changes", etc.)
+- Pre-checks detect signals but don't aggregate them
+- Chunk priorities exist but don't create PR-level metric
+- No single numeric measure of PR risk
+
+**Problems:**
+- No quantitative prioritization across PRs
+- Difficult to compare risk levels
+- No confidence measurement
+- Limited decision support
+
+**Day 22 solution:**
+- **Composite score**: Single 0-100 metric
+- **Risk level**: Categorical classification
+- **Confidence**: Signal strength indicator
+- **Breakdown**: Per-dimension visibility
+
+### Risk Dimensions
+
+**7 weighted dimensions:**
+
+| Dimension | Weight | Rationale |
+|-----------|--------|-----------|
+| Security | 0.25 | Highest - direct exploit potential |
+| Persistence | 0.18 | High - data corruption risk |
+| Concurrency | 0.15 | Significant - race conditions, deadlocks |
+| API Exposure | 0.12 | Moderate - public attack surface |
+| State Mutation | 0.10 | Moderate - side effect complexity |
+| Critical Path | 0.10 | Moderate - system availability impact |
+| Chunk Density | 0.10 | Lower - code volume indicator |
+
+**Weights sum to 1.0** (enforced at initialization)
+
+### Scoring Formula
+
+**Normalization (per dimension):**
+```
+normalized_score = min(1, signal_count / max_expected)
+```
+
+**Weighted sum:**
+```
+composite = Σ (dimension_score × dimension_weight)
+```
+
+**Final score:**
+```
+score = round(composite × 100)
+```
+
+**Example calculation:**
+```
+security: 3 signals / 5 max = 0.6 → × 0.25 = 0.15
+persistence: 2 signals / 5 max = 0.4 → × 0.18 = 0.072
+concurrency: 1 signal / 5 max = 0.2 → × 0.15 = 0.03
+apiExposure: 2 signals / 5 max = 0.4 → × 0.12 = 0.048
+stateMutation: 1 signal / 5 max = 0.2 → × 0.10 = 0.02
+criticalPath: 1 signal / 3 max = 0.33 → × 0.10 = 0.033
+chunkDensity: 5 high + 3 med / 15 total = 0.52 → × 0.10 = 0.052
+
+composite = 0.425
+score = 43 / 100
+level = MEDIUM
+```
+
+### Risk Level Classification
+
+**Thresholds:**
+- **0-39**: LOW ✅
+- **40-64**: MEDIUM ⚠️
+- **65-84**: HIGH 🔶
+- **85-100**: CRITICAL 🔴
+
+**Risk level semantics:**
+- **LOW**: Routine changes, minimal risk
+- **MEDIUM**: Notable complexity, standard review needed
+- **HIGH**: Significant risk, careful review required
+- **CRITICAL**: Major risk, senior review mandatory
+
+### Confidence Calculation
+
+**Confidence measures signal strength:**
+
+**Formula:**
+```
+confidence = Σ(signal_weight) / Σ(max_possible_weight)
+```
+
+**Signal weights:**
+- High confidence signal: 1.0
+- Medium confidence signal: 0.6
+- Low confidence signal: 0.3
+
+**Example:**
+```
+Signals: 3 high, 2 medium, 1 low
+weighted_sum = 3×1.0 + 2×0.6 + 1×0.3 = 4.5
+max_possible = 6×1.0 = 6.0
+confidence = 4.5 / 6.0 = 0.75 (75%)
+```
+
+**Confidence interpretation:**
+- **0.0-0.4**: Low confidence (weak signals)
+- **0.4-0.7**: Moderate confidence (mixed signals)
+- **0.7-1.0**: High confidence (strong signals)
+
+**No signals detected:** Confidence = 0.5 (neutral)
+
+### Chunk Density Scoring
+
+**Special dimension:** Aggregates chunk-level risk from Day 21
+
+**Formula:**
+```
+density = (high_chunks × 2 + medium_chunks) / (total_chunks × 2)
+```
+
+**Rationale:**
+- High-priority chunks weighted 2x
+- Dense high-priority changes = higher risk
+- Complements other pre-check dimensions
+
+**Example:**
+```
+Chunks: 5 high, 8 medium, 10 low (23 total)
+weighted = 5×2 + 8 = 18
+max = 23×2 = 46
+density = 18 / 46 = 0.39
+```
+
+### Output Format
+
+**In PR comment:**
+```markdown
+### 🔶 PR Risk Score: 72 / 100 (HIGH)
+**Confidence:** 83%
+
+## MergeSense Review
+
+**Assessment:** This PR introduces significant changes to authentication...
+...
+```
+
+**In logs:**
+```json
+{
+  "phase": "risk_score_computed",
+  "data": {
+    "score": 72,
+    "level": "HIGH",
+    "confidence": "0.83",
+    "breakdown": {
+      "security": "0.75",
+      "persistence": "0.60",
+      "concurrency": "0.40",
+      "apiExposure": "0.50",
+      "stateMutation": "0.30",
+      "criticalPath": "0.33",
+      "chunkDensity": "0.45"
+    }
+  }
+}
+```
+
+### What This Does NOT Change
+
+**Unchanged:**
+- ❌ AI gating logic (still uses shouldBlockAI)
+- ❌ AI verdict (still "safe", "requires_changes", etc.)
+- ❌ Fallback behavior
+- ❌ Postcondition validation
+- ❌ State machine transitions
+- ❌ Ledger/Merkle integrity
+
+**Composite score is:**
+- ✅ Additional metadata
+- ✅ Decision support
+- ✅ Explainability enhancement
+- ✅ Quantitative metric
+- ✅ NOT a replacement for AI judgment
+
+### Use Cases
+
+**1. PR prioritization:**
+```bash
+# Query decisions by risk score
+curl /decisions | jq '.decisions[] | {pr: .pr.number, score: .riskScore, level: .riskLevel}'
+```
+
+**2. Risk trending:**
+```bash
+# Average risk score over time
+curl /decisions | jq '[.decisions[].riskScore] | add / length'
+```
+
+**3. High-risk filtering:**
+```bash
+# Find all HIGH/CRITICAL PRs
+curl /decisions | jq '.decisions[] | select(.riskLevel == "HIGH" or .riskLevel == "CRITICAL")'
+```
+
+**4. Confidence analysis:**
+```bash
+# Low confidence reviews (may need human review)
+curl /decisions | jq '.decisions[] | select(.confidence < 0.5)'
+```
+
+### Verification Steps
+
+#### Verification 1: Low-Risk PR
+```bash
+# Process PR with minimal changes (utility refactor)
+```
+
+**Expected:**
+```
+PR Risk Score: 18 / 100 (LOW)
+Confidence: 50%
+```
+
+**Log:**
+```json
+{
+  "score": 18,
+  "level": "LOW",
+  "confidence": "0.50"
+}
+```
+
+---
+
+#### Verification 2: Security-Heavy PR
+```bash
+# Process PR modifying auth/security.ts
+```
+
+**Expected:**
+```
+PR Risk Score: 78 / 100 (HIGH)
+Confidence: 84%
+```
+
+**Breakdown:**
+- Security: High (0.80)
+- Other dimensions: Lower
+- Overall: Weighted toward security
+
+---
+
+#### Verification 3: Critical Multi-Dimension PR
+```bash
+# Process PR touching: security + persistence + concurrency + API
+```
+
+**Expected:**
+```
+PR Risk Score: 92 / 100 (CRITICAL)
+Confidence: 91%
+```
+
+**Breakdown:**
+- Multiple high-weight dimensions activated
+- High signal confidence
+- Critical classification triggered
+
+---
+
+#### Verification 4: Score Determinism
+```bash
+# Process same PR twice
+SCORE1=$(curl /decisions | jq '.decisions[0].riskScore')
+# Restart, process again
+SCORE2=$(curl /decisions | jq '.decisions[0].riskScore')
+
+echo "Scores match: $([[ "$SCORE1" == "$SCORE2" ]] && echo 'YES' || echo 'NO')"
+```
+
+**Expected:** YES (deterministic)
+
+---
+
+### Impact
+
+**Before Day 22:**
+```
+PR #42: AI verdict = "requires_changes"
+PR #43: AI verdict = "requires_changes"
+
+Which is higher priority? Unknown.
+```
+
+**After Day 22:**
+```
+PR #42: Score 45 (MEDIUM), Confidence 0.68
+PR #43: Score 78 (HIGH), Confidence 0.85
+
+Priority: PR #43 > PR #42 (quantifiable)
+```
+
+**Benefits:**
+1. **Quantitative prioritization** - Compare PRs numerically
+2. **Confidence awareness** - Know when signals are weak
+3. **Explainability** - Dimension breakdown shows why
+4. **Decision support** - Clear risk classification
+5. **Trending analysis** - Track risk over time
+
+### Technical Metrics
+
+**Computation cost:**
+- Dimension normalization: O(1) per dimension
+- Weighted sum: O(7) = O(1)
+- Total: ~1ms per PR
+- Negligible overhead
+
+**Storage:**
+- Score: 1 integer (4 bytes)
+- Level: 1 string (8-12 bytes)
+- Confidence: 1 float (8 bytes)
+- Breakdown: 7 floats (56 bytes)
+- Total: ~80 bytes per decision
+
+**Determinism:**
+- Pure function (no side effects)
+- No randomness
+- Same input → same output
+- Verifiable across instances
+
+---
+
+## Day 22 Complete
+
+MergeSense now has:
+- **Composite risk scoring** - Single 0-100 metric
+- **7 weighted dimensions** - Security, persistence, concurrency, API, state, critical path, chunk density
+- **Risk classification** - LOW/MEDIUM/HIGH/CRITICAL
+- **Confidence measurement** - Signal strength indicator
+- **Deterministic calculation** - Reproducible across runs
+- **Explainable breakdown** - Per-dimension visibility
+
+**Before Day 22:**
+- Qualitative AI review only
+- No PR-level risk metric
+- No quantitative comparison
+- No confidence measure
+
+**After Day 22:**
+- Quantitative + qualitative review
+- Composite PR risk score
+- Numeric prioritization
+- Confidence-aware decisions
+
+**The 22-day stack:**
+- Days 1-13: Correctness + resilience
+- Days 14-20: Formal verification + cryptographic integrity
+- Day 21: Intelligent segmentation
+- **Day 22: Quantitative risk intelligence**
+
+MergeSense is now a **formally verified, cryptographically tamper-evident, intelligently segmented code reviewer with quantitative risk assessment**.
+
+This is production-grade AI code review at the enterprise level.
+
+
 
 ## Day 21: Intelligent Diff Segmentation & Priority-Aware AI Reasoning
 

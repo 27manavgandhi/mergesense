@@ -15,9 +15,7 @@ export function formatRiskScore(score: CompositeRiskScore): string {
   ].join('\n');
 }
 
-/**
- * Format detailed breakdown for debugging/logging.
- */
+
 export function formatDetailedBreakdown(score: CompositeRiskScore): string {
   const dimensions = Object.entries(score.breakdown)
     .map(([key, value]) => `  - ${key}: ${(value * 100).toFixed(0)}%`)

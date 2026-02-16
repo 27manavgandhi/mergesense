@@ -664,6 +664,10 @@ async function emitDecision(
         reviewId
       );
     }
+
+
+    const review = await generateReview(filteredFiles, preChecks, trace, injectedFaults, stateMachine);
+    recordFinalVerdict(trace, review.verdict);
     
     // Create sealed decision record with ledger linkage
     const decision: DecisionRecord = {

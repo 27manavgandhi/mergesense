@@ -337,7 +337,41 @@ export async function processPullRequest(
         }
       }
     }
+
+
+    // Build intelligent diff chunks
+    logger.info('diff_intelligence_start', 'Building intelligent diff chunks');
     
+    const rawChunks = buildDiffChunks(filteredFiles);
+    const classifiedChunks = classifyChunks(rawChunks, preChecks);
+    const { included, truncated, summary } = prioritizeChunks(classifiedChunks);
+    const context = aggregatePRContext(filteredFiles, preChecks);
+    
+    const chunkedResult: ChunkedDiffResult = {
+      chunks: included,
+      context,
+      stats: {
+        totalChunks: classifiedChunks.length,
+        highPriority: classifiedChunks.filter(c => c.priority === 'high').length,
+        mediumPriority: classifiedChunks.filter(c => c.priority === 'medium').length,
+        lowPriority: classifiedChunks.filter(c => c.priority === 'low').length,
+        truncated,
+      },
+    };
+    
+    // Compute composite risk score
+    const compositeScore = computeCompositeRiskScore(preChecks, classifiedChunks);
+    
+    logger.info('composite_risk_score', 'PR risk score computed', {
+      score: compositeScore.score,
+      level: compositeScore.level,
+      confidence: compositeScore.confidence.toFixed(2),
+    });
+    
+
+
+
+
     const comment = formatReview(review, filterResult);
 
     stateMachine.transition('COMMENT_PENDING');

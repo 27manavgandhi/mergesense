@@ -27,6 +27,10 @@ import { LedgerGenerationError } from '../ledger/ledger-types.js';
 import { checkPostconditions } from '../postconditions/checker.js';
 import type { PostconditionContext } from '../postconditions/types.js';
 
+import { computeCompositeRiskScore } from '../analysis/risk-scoring/scoring-engine.js';
+import { formatRiskScore } from '../analysis/risk-scoring/score-formatter.js';
+
+
 import { 
   createDecisionTrace, 
   recordPreCheckResults, 

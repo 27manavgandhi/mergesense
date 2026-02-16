@@ -835,8 +835,13 @@ async function emitDecision(
       }
     }
   }
-}
 
+}
+const reviewComment = formatReview(review, filterResult);
+    const scoreBlock = formatRiskScore(compositeScore);
+    const comment = scoreBlock + reviewComment;
+
+    stateMachine.transition('COMMENT_PENDING');
 async function emitDecision(
   context: PRContext,
   reviewId: string,
@@ -932,3 +937,5 @@ async function emitDecision(
     }
   }
 }
+
+

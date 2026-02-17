@@ -30,6 +30,11 @@ import type { PostconditionContext } from '../postconditions/types.js';
 import { computeCompositeRiskScore } from '../analysis/risk-scoring/scoring-engine.js';
 import { formatRiskScore } from '../analysis/risk-scoring/score-formatter.js';
 
+import { computeVerdictConfidence } from '../analysis/verdict-confidence/verdict-confidence.js';
+import { formatVerdictConfidence } from '../analysis/verdict-confidence/verdict-formatter.js';
+import type { VerdictConfidence } from '../analysis/verdict-confidence/verdict-types.js';
+
+
 
 import { 
   createDecisionTrace, 
@@ -549,7 +554,84 @@ async function emitDecision(
         proofHash: executionProofHash,
         algorithm: 'sha256-v1',
       });
-      
+      const review = await generateReview(
+      filteredFiles, preChecks, trace, injectedFaults, stateMachine
+    );
+    recordFinalVerdict(trace, review.verdict);
+
+    // Compute composite risk score (from Day 22)
+    const compositeScore = computeCompositeRiskScore(preChecks, classifiedChunks);
+
+    logger.info('composite_risk_score', 'PR risk score computed', {
+      score: compositeScore.score,
+      level: compositeScore.level,
+      confidence: compositeScore.confidence.toFixed(2),
+    });
+
+    // Compute verdict confidence (Day 23)
+    let verdictConfidence: VerdictConfidence | undefined;
+
+    if (review.verdict) {
+      verdictConfidence = computeVerdictConfidence(review.verdict, compositeScore);
+
+      if (verdictConfidence.manualReviewRecommended) {
+        logger.warn('manual_review_recommended', 'Low confidence or high risk: human review recommended', {
+          reviewId,
+          verdict: verdictConfidence.verdict,
+          confidence: verdictConfidence.confidence.toFixed(2),
+          uncertainty: verdictConfidence.uncertainty,
+          riskLevel: compositeScore.level,
+        });
+      }
+    }
+
+    // ... (in pipeline path recording section:)
+
+    if (trace.fallbackUsed) {
+      stateMachine.transition('REVIEW_READY');
+      const path = trace.fallbackReason?.trigger === 'quality_rejection'
+        ? 'ai_fallback_quality'
+        : 'ai_fallback_error';
+      recordPipelinePath(trace, path);
+      try { metrics.recordPipelinePath(path); }
+      catch (e) { if (e instanceof FaultInjectionError) injectedFaults.push(e.faultCode); }
+    } else {
+      stateMachine.transition('REVIEW_READY');
+      recordPipelinePath(trace, 'ai_review');
+      try { metrics.recordPipelinePath('ai_review'); }
+      catch (e) { if (e instanceof FaultInjectionError) injectedFaults.push(e.faultCode); }
+    }
+
+    // Build final comment with risk score + confidence blocks
+    const reviewComment = formatReview(review, filterResult);
+    const scoreBlock = formatRiskScore(compositeScore);
+    const confidenceBlock = verdictConfidence
+      ? formatVerdictConfidence(verdictConfidence)
+      : '';
+
+    const comment = scoreBlock + confidenceBlock + reviewComment;
+
+    stateMachine.transition('COMMENT_PENDING');
+
+    // ... (existing comment posting logic)
+
+    // ... (in emitDecision, extend decision record with new fields:)
+
+    const decision: DecisionRecord = {
+      // ... all existing fields ...
+      verdictConfidence: verdictConfidence ? {
+        confidence: verdictConfidence.confidence,
+        uncertainty: verdictConfidence.uncertainty,
+        manualReviewRecommended: verdictConfidence.manualReviewRecommended,
+        alignmentWithRiskScore: verdictConfidence.alignmentWithRiskScore,
+      } : undefined,
+      compositeRiskScore: {
+        score: compositeScore.score,
+        level: compositeScore.level,
+        confidence: compositeScore.confidence,
+      },
+      // ... rest of existing fields ...
+    };
       // Create sealed decision record
       const decision: DecisionRecord = {
         ...baseDecision,

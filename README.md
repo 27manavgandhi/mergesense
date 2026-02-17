@@ -51,6 +51,368 @@ Review Generated (AI or fallback)
 Single Comment Posted to PR
 
 ```
+
+## Day 23: Review Confidence Model (Probabilistic Verdict Engine)
+
+### What Changed
+
+**Before (Day 22):**
+- AI verdict (qualitative label)
+- Composite risk score (quantitative)
+- No confidence in verdict itself
+- No uncertainty classification
+- No automatic manual review triggers
+
+**After (Day 23):**
+- Verdict confidence (0-1)
+- Uncertainty classification (LOW/MODERATE/HIGH)
+- Manual review recommendation (deterministic)
+- Misalignment detection (AI vs. risk score)
+- Probabilistic governance reasoning
+
+### Why Verdict Confidence?
+
+**Before:**
+```
+Verdict: "requires_changes"
+```
+
+**After:**
+```
+Verdict: "requires_changes"
+Confidence: 74%
+Uncertainty: MODERATE
+Manual Review Recommended: NO
+Alignment: aligned
+```
+
+**Problems Day 23 solves:**
+
+1. **Overconfident automation**: AI gives verdict, no way to know if it's reliable
+2. **Risk-verdict mismatch**: CRITICAL risk PR with "safe" verdict - caught by misalignment
+3. **Governance gaps**: No threshold for when to require human review
+4. **Opaque reliability**: Developer can't know how much to trust the review
+
+### Confidence Formula
+
+**Components:**
+
+1. **Base confidence** (70% weight) - From risk signal strength (Day 22)
+2. **Alignment score** (30% weight) - Does AI verdict match risk level?
+
+**Formula:**
+```
+final_confidence = min(1, base_confidence × 0.7 + alignment × 0.3)
+```
+
+**Weight rationale:**
+- Signal confidence (70%): Primary measure of ground truth
+- Alignment (30%): Sanity check between qualitative + quantitative
+
+**Alignment scoring:**
+- Verdict matches expected for risk level: `1.0`
+- Verdict contradicts risk level: `0.5` (penalty applied)
+
+**Expected alignments:**
+| Risk Level | Expected Verdicts |
+|------------|------------------|
+| LOW | safe, safe_with_conditions |
+| MEDIUM | safe_with_conditions, requires_changes |
+| HIGH | requires_changes, high_risk |
+| CRITICAL | high_risk |
+
+### Uncertainty Classification
+
+**Thresholds:**
+- `confidence ≥ 0.80` → **LOW** 🟢 (high confidence, trust the verdict)
+- `confidence ≥ 0.60` → **MODERATE** 🟡 (some uncertainty, review carefully)
+- `confidence < 0.60` → **HIGH** 🔴 (low confidence, manual review warranted)
+
+### Manual Review Recommendation Policy
+
+**Deterministic triggers:**
+```
+confidence < 0.50                          → recommend
+risk.level == 'HIGH' AND confidence < 0.70 → recommend
+risk.level == 'CRITICAL' AND confidence < 0.85 → recommend
+```
+
+**Rationale:**
+- **Absolute low**: < 50% confidence means signals contradictory regardless of risk
+- **High risk threshold**: 70% minimum for HIGH risk PRs before automation trusted
+- **Critical risk threshold**: 85% minimum for CRITICAL - errors here are most costly
+- **MEDIUM/LOW**: Standard confidence (50%) sufficient - consequences limited
+
+**Governance interpretation:**
+- `manualReviewRecommended: false` → Safe to rely on AI verdict
+- `manualReviewRecommended: true` → Route to human reviewer before merge
+
+### Misalignment Detection
+
+**Example: CRITICAL risk, "safe" verdict**
+```json
+{
+  "verdict": "safe",
+  "compositeRiskScore": {
+    "score": 91,
+    "level": "CRITICAL"
+  },
+  "verdictConfidence": {
+    "confidence": 0.50,
+    "uncertainty": "HIGH",
+    "manualReviewRecommended": true,
+    "alignmentWithRiskScore": "misaligned"
+  }
+}
+```
+
+**What happened:**
+- Risk engine detected CRITICAL signals
+- AI assessed "safe"
+- Misalignment penalty applied (0.5 instead of 1.0)
+- Confidence reduced
+- Manual review triggered
+
+**Log output:**
+```json
+{
+  "phase": "verdict_misalignment",
+  "level": "warn",
+  "message": "AI verdict misaligned with risk score",
+  "data": {
+    "verdict": "safe",
+    "riskLevel": "CRITICAL",
+    "riskScore": 91,
+    "expectedVerdicts": ["high_risk"]
+  }
+}
+```
+
+**This is a safety net**, not a failure. The misalignment is surfaced, manual review triggered.
+
+### Decision Record Fields
+
+**Every decision now includes:**
+```json
+{
+  "verdict": "requires_changes",
+  "verdictConfidence": {
+    "confidence": 0.74,
+    "uncertainty": "MODERATE",
+    "manualReviewRecommended": false,
+    "alignmentWithRiskScore": "aligned"
+  },
+  "compositeRiskScore": {
+    "score": 72,
+    "level": "HIGH",
+    "confidence": 0.83
+  }
+}
+```
+
+**Query decisions requiring manual review:**
+```bash
+curl http://localhost:3000/decisions | jq '.decisions[] | select(.verdictConfidence.manualReviewRecommended == true)'
+```
+
+**Query misaligned verdicts:**
+```bash
+curl http://localhost:3000/decisions | jq '.decisions[] | select(.verdictConfidence.alignmentWithRiskScore == "misaligned")'
+```
+
+**Query by uncertainty:**
+```bash
+curl http://localhost:3000/decisions | jq '.decisions[] | select(.verdictConfidence.uncertainty == "HIGH")'
+```
+
+### PR Comment Output
+
+**Full comment structure:**
+```markdown
+### 🔶 PR Risk Score: 72 / 100 (HIGH)
+**Confidence:** 83%
+
+### 🟡 Verdict Confidence
+**Confidence:** 74%
+**Uncertainty:** MODERATE
+**Manual Review Recommended:** NO
+
+## MergeSense Review
+
+**Assessment:** This PR modifies authentication layer...
+...
+```
+
+**With misalignment:**
+```markdown
+### 🔴 PR Risk Score: 92 / 100 (CRITICAL)
+**Confidence:** 91%
+
+### 🔴 Verdict Confidence
+**Confidence:** 50%
+**Uncertainty:** HIGH
+**Manual Review Recommended:** **YES — human review strongly recommended**
+> ⚡ Note: AI verdict and quantitative risk score are misaligned. Review carefully.
+
+## MergeSense Review
+...
+```
+
+### Verification Steps
+
+#### Verification 1: Low-Risk Aligned
+```bash
+# Process routine utility PR
+```
+
+**Expected:**
+```
+Risk Score: 18 / 100 (LOW)
+Verdict: "safe"
+Confidence: 85%  (high base × 1.0 alignment)
+Uncertainty: LOW
+Manual Review: NO
+Alignment: aligned
+```
+
+---
+
+#### Verification 2: High-Risk Misalignment
+```bash
+# Process PR touching auth + persistence
+# AI returns "safe" (hallucination scenario)
+```
+
+**Expected:**
+```
+Risk Score: 82 / 100 (HIGH)
+Verdict: "safe"
+Confidence: ~58%  (base 0.83 × 0.7 + 0.5 × 0.3 = 0.731 → wait...)
+Uncertainty: MODERATE
+Manual Review: YES  (HIGH risk, confidence < 0.70)
+Alignment: misaligned
+```
+
+**Exact calculation:**
+```
+base_confidence = 0.83 (from risk signals)
+alignment_score = 0.5 (misaligned penalty)
+final = 0.83 × 0.7 + 0.5 × 0.3 = 0.581 + 0.150 = 0.731
+
+Wait: risk is HIGH, confidence 0.731 > 0.70 → no manual trigger
+But: misalignment is logged
+```
+
+**Correct expected:**
+```
+Confidence: 73%
+Manual Review: NO (0.731 > 0.70 threshold for HIGH)
+Alignment: misaligned  ← still flagged
+```
+
+**With CRITICAL risk:**
+```
+base_confidence = 0.91
+alignment_score = 0.5
+final = 0.91 × 0.7 + 0.5 × 0.3 = 0.637 + 0.150 = 0.787
+
+CRITICAL risk, confidence 0.787 < 0.85 → manual review YES
+```
+
+---
+
+#### Verification 3: Confidence Determinism
+```bash
+# Process same PR twice
+CONF1=$(curl -s /decisions | jq '.decisions[0].verdictConfidence.confidence')
+CONF2=$(curl -s /decisions | jq '.decisions[0].verdictConfidence.confidence')
+echo "Match: $([[ "$CONF1" == "$CONF2" ]] && echo YES || echo NO)"
+```
+
+**Expected:** YES
+
+---
+
+#### Verification 4: Manual Review Trigger
+```bash
+# Process CRITICAL risk PR
+curl /decisions | jq '.decisions[0] | {
+  riskLevel: .compositeRiskScore.level,
+  confidence: .verdictConfidence.confidence,
+  manualReview: .verdictConfidence.manualReviewRecommended
+}'
+```
+
+**Expected (CRITICAL + low confidence):**
+```json
+{
+  "riskLevel": "CRITICAL",
+  "confidence": 0.78,
+  "manualReview": true
+}
+```
+
+---
+
+### Impact on Product Value
+
+**Before Day 23:**
+- AI says "requires_changes" - how confident?
+- CRITICAL risk PR, AI says "safe" - trust it?
+- No governance threshold for automation
+- No explainability of verdict reliability
+
+**After Day 23:**
+- Every verdict has quantified confidence
+- Misalignments surfaced explicitly
+- Deterministic thresholds for human routing
+- Enterprise-grade decision transparency
+
+**Real-world governance use case:**
+```
+Policy: "Auto-approve merges only when:
+  - Risk Level ≤ MEDIUM
+  - Verdict Confidence ≥ 0.80
+  - Uncertainty = LOW
+  - manualReviewRecommended = false"
+```
+
+This policy can now be enforced deterministically against the decision record.
+
+---
+
+## Day 23 Complete
+
+MergeSense now has:
+- **Verdict confidence** (0-1) on every AI review
+- **Uncertainty classification** (LOW/MODERATE/HIGH)
+- **Manual review policy** - deterministic governance thresholds
+- **Misalignment detection** - AI vs. quantitative risk flagging
+- **Decision record augmentation** - confidence fields queryable
+- **PR comment enrichment** - confidence visible to developers
+
+**Before Day 23:**
+- Binary AI verdict
+- No confidence measure
+- No governance automation
+- No misalignment detection
+
+**After Day 23:**
+- Probabilistic verdict reasoning
+- Confidence-based governance
+- Deterministic manual review triggers
+- AI-vs-risk-score alignment checking
+
+**The complete intelligence stack:**
+- **Day 21:** Intelligent segmentation
+- **Day 22:** Quantitative risk scoring
+- **Day 23:** Probabilistic verdict confidence
+
+**Together:** MergeSense doesn't just detect risk - it quantifies confidence in its own reasoning, enabling enterprise-grade governance automation.
+
+This is the difference between a code review tool and a trusted engineering system.
+
+
 ## Day 22: Weighted Risk Scoring Engine (Composite PR Risk Intelligence)
 
 ### What Changed

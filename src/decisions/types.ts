@@ -1,8 +1,9 @@
 import { PreCheckResult } from '../types.js';
 import type { InvariantViolation } from '../invariants/types.js';
 import type { PipelineState } from '../pipeline/state/states.js';
+import type { UncertaintyLevel } from '../analysis/verdict-confidence/verdict-types.js';
 
-export type DecisionPath = 
+export type DecisionPath =
   | 'ai_review'
   | 'silent_exit_safe'
   | 'silent_exit_filtered'
@@ -34,6 +35,17 @@ export interface DecisionRecord {
     criticalCategories: string[];
   };
   verdict?: 'safe' | 'safe_with_conditions' | 'requires_changes' | 'high_risk';
+  verdictConfidence?: {
+    confidence: number;
+    uncertainty: UncertaintyLevel;
+    manualReviewRecommended: boolean;
+    alignmentWithRiskScore: 'aligned' | 'misaligned';
+  };
+  compositeRiskScore?: {
+    score: number;
+    level: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+    confidence: number;
+  };
   commentPosted: boolean;
   processingTimeMs: number;
   instanceMode: 'single-instance' | 'distributed' | 'degraded';

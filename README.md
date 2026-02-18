@@ -52,6 +52,476 @@ Single Comment Posted to PR
 
 ```
 
+## Day 24: Merge Policy Enforcement Mode (Enterprise Governance Layer)
+
+### What Changed
+
+**Before (Day 23):**
+- AI review advisory only
+- No merge blocking capability
+- No governance enforcement
+- Risk/confidence scores informational
+
+**After (Day 24):**
+- Configurable merge enforcement
+- GitHub status check integration
+- Deterministic policy evaluation
+- Repo-level policy overrides
+- Enterprise governance ready
+
+### Why Merge Policy Enforcement?
+
+**Before:**
+```
+AI: "HIGH risk, low confidence, manual review recommended"
+Developer: *merges anyway*
+```
+
+**After:**
+```
+Policy Mode: ENFORCE
+Risk: HIGH (exceeds MEDIUM threshold)
+Confidence: 58% (below 60% minimum)
+→ GitHub Status Check: FAILURE
+→ Merge blocked until policy satisfied
+```
+
+**MergeSense transforms from:**
+- Advisory reviewer → Governance-aware gatekeeper
+- Recommendations → Enforcement
+- Informational → Actionable
+
+### Enforcement Modes
+
+**Three deterministic modes:**
+
+#### 1. OFF (Default)
+```bash
+MERGESENSE_POLICY_MODE=OFF
+```
+
+**Behavior:**
+- Review comment posted
+- No status check published
+- No merge blocking
+- Backward compatible with all previous days
+
+**Use case:** Initial rollout, testing, advisory-only organizations
+
+---
+
+#### 2. WARN
+```bash
+MERGESENSE_POLICY_MODE=WARN
+```
+
+**Behavior:**
+- Review comment posted
+- Status check published: **always SUCCESS**
+- Policy violations shown in status description
+- No merge blocking (warnings only)
+
+**Status examples:**
+- Pass: `✅ Policy passed`
+- Violation: `⚠️ Policy warning: Risk level HIGH exceeds allowed MEDIUM; Confidence 58% below minimum 60%`
+
+**Use case:** Transition period, monitoring policy violations without blocking
+
+---
+
+#### 3. ENFORCE
+```bash
+MERGESENSE_POLICY_MODE=ENFORCE
+```
+
+**Behavior:**
+- Review comment posted
+- Status check published: **SUCCESS or FAILURE**
+- Policy violations block merge (if status check configured as required)
+- Explicit governance enforcement
+
+**Status examples:**
+- Pass: `✅ Policy passed`
+- Violation: `❌ Policy violation: Risk level CRITICAL exceeds allowed HIGH`
+
+**Use case:** Production governance, compliance requirements, security-critical repos
+
+---
+
+### Policy Dimensions
+
+**Policy evaluates 3 criteria:**
+
+#### 1. Risk Level Threshold
+```bash
+MERGESENSE_MAX_RISK_LEVEL=MEDIUM
+```
+
+**Blocks if:**
+```
+PR risk level > configured threshold
+```
+
+**Example:**
+- Configured: `MEDIUM`
+- PR Risk: `HIGH`
+- Result: **Violation**
+
+---
+
+#### 2. Minimum Confidence
+```bash
+MERGESENSE_MIN_CONFIDENCE=0.70
+```
+
+**Blocks if:**
+```
+Verdict confidence < configured minimum
+```
+
+**Example:**
+- Configured: `0.70`
+- PR Confidence: `0.58`
+- Result: **Violation**
+
+---
+
+#### 3. Alignment Enforcement
+```bash
+MERGESENSE_ALLOW_MISALIGNED=false
+```
+
+**Blocks if:**
+```
+AI verdict misaligned with risk score AND allowMisaligned=false
+```
+
+**Example:**
+- Configured: `false`
+- PR: Risk CRITICAL, Verdict "safe" (misaligned)
+- Result: **Violation**
+
+---
+
+### Configuration
+
+**Environment variables:**
+```bash
+# Mode (required)
+MERGESENSE_POLICY_MODE=OFF | WARN | ENFORCE
+
+# Risk threshold (optional, default: HIGH)
+MERGESENSE_MAX_RISK_LEVEL=LOW | MEDIUM | HIGH | CRITICAL
+
+# Confidence threshold (optional, default: 0.60)
+MERGESENSE_MIN_CONFIDENCE=0.70
+
+# Allow misalignment (optional, default: true)
+MERGESENSE_ALLOW_MISALIGNED=false
+
+# Repo overrides (optional, default: none)
+MERGESENSE_REPO_OVERRIDE_LIST=owner/repo,owner2/repo2
+```
+
+**Validation:**
+- Invalid mode → **startup failure**
+- Invalid confidence (< 0 or > 1) → **startup failure**
+- Invalid risk level → **startup failure**
+- Deterministic. Fail-fast.
+
+---
+
+### Repo Override List
+
+**Bypass policy for specific repositories:**
+```bash
+MERGESENSE_REPO_OVERRIDE_LIST=acme/legacy-app,acme/experimental
+```
+
+**When repo in override list:**
+- Policy evaluation skipped
+- Status check: always SUCCESS
+- All PRs allowed regardless of risk/confidence
+
+**Use cases:**
+- Legacy repositories with different risk profiles
+- Experimental projects
+- Temporary exceptions during migrations
+- Repos with external governance processes
+
+---
+
+### GitHub Status Check Integration
+
+**Setup requirements:**
+
+1. **Enable status checks** in GitHub repo settings:
+   - Settings → Branches → Branch protection rules
+   - Add required status check: `MergeSense Policy`
+
+2. **Configure policy mode:**
+```bash
+   MERGESENSE_POLICY_MODE=ENFORCE
+```
+
+3. **Set thresholds:**
+```bash
+   MERGESENSE_MAX_RISK_LEVEL=MEDIUM
+   MERGESENSE_MIN_CONFIDENCE=0.70
+```
+
+**Result:**
+- GitHub prevents merge if status check fails
+- Developers see clear policy violation message
+- Merge button disabled until policy satisfied
+
+---
+
+### Decision Record
+
+**Every decision now includes policy evaluation:**
+```json
+{
+  "reviewId": "abc123",
+  "compositeRiskScore": {
+    "score": 82,
+    "level": "HIGH"
+  },
+  "verdictConfidence": {
+    "confidence": 0.58,
+    "uncertainty": "MODERATE"
+  },
+  "mergePolicy": {
+    "mode": "ENFORCE",
+    "allowed": false,
+    "violated": true,
+    "reasons": [
+      "Risk level HIGH exceeds allowed MEDIUM",
+      "Confidence 58% below minimum 70%"
+    ]
+  }
+}
+```
+
+**Query policy violations:**
+```bash
+curl http://localhost:3000/decisions | jq '.decisions[] | select(.mergePolicy.violated == true)'
+```
+
+**Query blocked merges:**
+```bash
+curl http://localhost:3000/decisions | jq '.decisions[] | select(.mergePolicy.allowed == false)'
+```
+
+**Policy violation rate:**
+```bash
+curl http://localhost:3000/decisions | jq '[.decisions[].mergePolicy] | map(select(.violated)) | length'
+```
+
+---
+
+### Verification Scenarios
+
+#### Scenario 1: OFF Mode (Default)
+```bash
+MERGESENSE_POLICY_MODE=OFF
+# Process PR
+```
+
+**Expected:**
+- Review comment posted: ✅
+- Status check published: ❌
+- Merge blocking: ❌
+
+**Log:**
+```json
+{
+  "phase": "policy_status_skipped",
+  "message": "Policy mode OFF, no status check published"
+}
+```
+
+---
+
+#### Scenario 2: WARN Mode with Violation
+```bash
+MERGESENSE_POLICY_MODE=WARN
+MERGESENSE_MAX_RISK_LEVEL=MEDIUM
+# Process HIGH risk PR
+```
+
+**Expected:**
+- Review comment posted: ✅
+- Status check: SUCCESS ⚠️
+- Status description: `⚠️ Policy warning: Risk level HIGH exceeds allowed MEDIUM`
+- Merge blocking: ❌ (warning only)
+
+---
+
+#### Scenario 3: ENFORCE Mode with Violation
+```bash
+MERGESENSE_POLICY_MODE=ENFORCE
+MERGESENSE_MAX_RISK_LEVEL=MEDIUM
+MERGESENSE_MIN_CONFIDENCE=0.70
+# Process HIGH risk, 58% confidence PR
+```
+
+**Expected:**
+- Review comment posted: ✅
+- Status check: FAILURE ❌
+- Status description: `❌ Policy violation: Risk level HIGH exceeds allowed MEDIUM; Confidence 58% below minimum 70%`
+- Merge blocking: ✅ (if status check required)
+
+**Log:**
+```json
+{
+  "phase": "policy_enforced_block",
+  "level": "warn",
+  "message": "Merge blocked by policy enforcement",
+  "data": {
+    "reasons": [
+      "Risk level HIGH exceeds allowed MEDIUM",
+      "Confidence 58% below minimum 70%"
+    ]
+  }
+}
+```
+
+---
+
+#### Scenario 4: Repo Override
+```bash
+MERGESENSE_POLICY_MODE=ENFORCE
+MERGESENSE_REPO_OVERRIDE_LIST=acme/legacy-app
+# Process PR in acme/legacy-app
+```
+
+**Expected:**
+- Policy evaluation: Bypassed
+- Status check: SUCCESS ✅
+- Merge blocking: ❌ (override)
+
+**Log:**
+```json
+{
+  "phase": "policy_repo_override",
+  "message": "Repository in override list, policy bypassed"
+}
+```
+
+---
+
+### Example Policy Configurations
+
+#### Configuration 1: Strict Security
+```bash
+MERGESENSE_POLICY_MODE=ENFORCE
+MERGESENSE_MAX_RISK_LEVEL=MEDIUM
+MERGESENSE_MIN_CONFIDENCE=0.80
+MERGESENSE_ALLOW_MISALIGNED=false
+```
+
+**Effect:**
+- Only LOW/MEDIUM risk allowed
+- High confidence required (80%+)
+- Misalignment blocks merge
+- Strictest governance
+
+---
+
+#### Configuration 2: Balanced Production
+```bash
+MERGESENSE_POLICY_MODE=ENFORCE
+MERGESENSE_MAX_RISK_LEVEL=HIGH
+MERGESENSE_MIN_CONFIDENCE=0.70
+MERGESENSE_ALLOW_MISALIGNED=true
+```
+
+**Effect:**
+- HIGH risk allowed (CRITICAL blocked)
+- Moderate confidence required (70%+)
+- Misalignment allowed
+- Standard production
+
+---
+
+#### Configuration 3: Advisory Only
+```bash
+MERGESENSE_POLICY_MODE=WARN
+MERGESENSE_MAX_RISK_LEVEL=CRITICAL
+MERGESENSE_MIN_CONFIDENCE=0.50
+```
+
+**Effect:**
+- All risks allowed
+- Low confidence acceptable
+- Warnings only
+- Monitoring phase
+
+---
+
+### Impact
+
+**Before Day 24:**
+```
+MergeSense: "This PR is HIGH risk with 58% confidence"
+Developer: *clicks merge anyway*
+Result: Risky PR merged, no governance
+```
+
+**After Day 24:**
+```
+MergeSense: "Policy violation: Risk HIGH exceeds MEDIUM"
+GitHub: Status check FAILURE
+Developer: Cannot merge until risk reduced or policy adjusted
+Result: Governance enforced, risky PRs blocked
+```
+
+**Governance capabilities:**
+- ✅ Automated merge blocking
+- ✅ Risk-based gating
+- ✅ Confidence thresholds
+- ✅ Repo-level exceptions
+- ✅ Full audit trail in ledger
+- ✅ Deterministic enforcement
+- ✅ Zero infrastructure added
+
+---
+
+## Day 24 Complete
+
+MergeSense now has:
+- **3 enforcement modes** (OFF/WARN/ENFORCE)
+- **Risk threshold enforcement** (block above configured level)
+- **Confidence thresholds** (block below minimum)
+- **Alignment enforcement** (optional misalignment blocking)
+- **Repo override capability** (bypass for specific repos)
+- **GitHub status check integration** (native merge blocking)
+- **Decision record augmentation** (policy results in ledger)
+- **Environment-based configuration** (no runtime mutation)
+
+**Before Day 24:**
+- Advisory only
+- No enforcement
+- No merge blocking
+- Recommendations ignored
+
+**After Day 24:**
+- Configurable enforcement
+- Automated merge blocking
+- Risk-based governance
+- Enterprise ready
+
+**The complete governance stack:**
+- **Day 22:** Quantitative risk scoring
+- **Day 23:** Verdict confidence
+- **Day 24:** Merge policy enforcement
+
+**Together:** MergeSense is a governance-aware engineering control system with deterministic merge blocking, full audit trails, and enterprise-grade policy enforcement.
+
+This is the difference between an AI reviewer and a trusted governance gatekeeper.
+
+
 ## Day 23: Review Confidence Model (Probabilistic Verdict Engine)
 
 ### What Changed

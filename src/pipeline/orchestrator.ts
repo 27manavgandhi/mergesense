@@ -34,6 +34,10 @@ import { computeVerdictConfidence } from '../analysis/verdict-confidence/verdict
 import { formatVerdictConfidence } from '../analysis/verdict-confidence/verdict-formatter.js';
 import type { VerdictConfidence } from '../analysis/verdict-confidence/verdict-types.js';
 
+import { POLICY_CONFIG } from '../policy/policy-config.js';
+import { evaluateMergePolicy } from '../policy/policy-evaluator.js';
+import { handlePolicyStatus } from '../policy/status-publisher.js';
+import type { MergePolicyResult } from '../policy/policy-types.js';
 
 
 import { 
@@ -342,7 +346,65 @@ export async function processPullRequest(
         }
       }
     }
+// Compute verdict confidence (Day 23)
+    let verdictConfidence: VerdictConfidence | undefined;
+    let policyResult: MergePolicyResult | undefined;
 
+    if (review.verdict) {
+      verdictConfidence = computeVerdictConfidence(review.verdict, compositeScore);
+
+      if (verdictConfidence.manualReviewRecommended) {
+        logger.warn('manual_review_recommended', 'Low confidence or high risk: human review recommended', {
+          reviewId,
+          verdict: verdictConfidence.verdict,
+          confidence: verdictConfidence.confidence.toFixed(2),
+          uncertainty: verdictConfidence.uncertainty,
+          riskLevel: compositeScore.level,
+        });
+      }
+
+      // Evaluate merge policy (Day 24)
+      policyResult = evaluateMergePolicy(
+        `${context.owner}/${context.repo}`,
+        compositeScore,
+        verdictConfidence
+      );
+
+      // Publish status check (if policy mode enabled)
+      if (POLICY_CONFIG.mode !== 'OFF') {
+        try {
+          await handlePolicyStatus(
+            octokit,
+            context.owner,
+            context.repo,
+            context.sha,
+            policyResult
+          );
+        } catch (statusError) {
+          logger.error('status_check_failed', 'Failed to publish policy status check', {
+            error: statusError instanceof Error ? statusError.message : 'Unknown error',
+            owner: context.owner,
+            repo: context.repo,
+          });
+          // Continue - don't fail pipeline if status check fails
+        }
+      }
+    }
+
+    // ... (rest of comment posting logic)
+
+    // ... (in emitDecision, extend decision record:)
+
+    const decision: DecisionRecord = {
+      // ... all existing fields ...
+      mergePolicy: policyResult ? {
+        mode: POLICY_CONFIG.mode,
+        allowed: policyResult.allowed,
+        violated: policyResult.violated,
+        reasons: policyResult.reasons,
+      } : undefined,
+      // ... rest of existing fields ...
+    };
 
     // Build intelligent diff chunks
     logger.info('diff_intelligence_start', 'Building intelligent diff chunks');

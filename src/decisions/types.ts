@@ -2,6 +2,7 @@ import { PreCheckResult } from '../types.js';
 import type { InvariantViolation } from '../invariants/types.js';
 import type { PipelineState } from '../pipeline/state/states.js';
 import type { UncertaintyLevel } from '../analysis/verdict-confidence/verdict-types.js';
+import type { PolicyMode } from '../policy/policy-types.js';
 
 export type DecisionPath =
   | 'ai_review'
@@ -45,6 +46,12 @@ export interface DecisionRecord {
     score: number;
     level: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
     confidence: number;
+  };
+  mergePolicy?: {
+    mode: PolicyMode;
+    allowed: boolean;
+    violated: boolean;
+    reasons: string[];
   };
   commentPosted: boolean;
   processingTimeMs: number;

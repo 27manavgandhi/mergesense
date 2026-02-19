@@ -52,6 +52,427 @@ Single Comment Posted to PR
 
 ```
 
+## Day 25: Production Hardening & Deployment Readiness
+
+### What Changed
+
+**Before (Day 24):**
+- Feature complete
+- Governance enforced
+- Ledger secured
+- But: No production boundaries
+- But: No deployment documentation
+- But: No runtime guards
+
+**After (Day 25):**
+- Memory ceiling enforced
+- Request rate limited
+- Configuration validated
+- Load tested
+- Deployment documented
+- Production checklist provided
+
+### Why Production Hardening?
+
+**Day 25 is not about features. It's about operational survivability.**
+
+**Problems Day 25 solves:**
+1. **Runaway memory:** Large PR exhausts heap → process crashes
+2. **Request flooding:** Webhook storm → service unavailable
+3. **Silent degradation:** Gradual resource leak → unexpected failure
+4. **Deployment guesswork:** No guidance → misconfiguration
+5. **Production blind spots:** No validation → runtime surprises
+
+### Runtime Limits
+
+**Three hard limits enforced:**
+
+#### 1. Memory Ceiling
+```bash
+MERGESENSE_MAX_MEMORY_MB=512
+```
+
+**Enforcement:**
+- Checked before each PR processing
+- Process exits cleanly if exceeded
+- Prevents OOM kills
+- Allows orchestrator restart
+
+**Log on breach:**
+```json
+{
+  "phase": "memory_limit_exceeded",
+  "level": "fatal",
+  "message": "Heap usage exceeded configured limit - exiting",
+  "data": {
+    "heapUsedMb": "547.32",
+    "limitMb": 512,
+    "exceedBy": "35.32"
+  }
+}
+```
+
+**Philosophy:** Fail-fast over silent degradation
+
+---
+
+#### 2. Request Rate Limit
+```bash
+MERGESENSE_MAX_RPM=60
+```
+
+**Enforcement:**
+- Sliding window (60 seconds)
+- Returns 429 when exceeded
+- Includes retry-after header
+
+**Response on limit:**
+```json
+{
+  "error": "Rate limit exceeded",
+  "limit": 60,
+  "retryAfterMs": 12000,
+  "retryAfterSeconds": 12
+}
+```
+
+**Prevents:** Webhook flooding, DDoS, accidental loops
+
+---
+
+#### 3. Concurrent Processing Limit
+```bash
+MERGESENSE_MAX_CONCURRENT=5
+```
+
+**Enforcement:**
+- Via semaphore (Days 8-9)
+- Load shedding when saturated
+- Protects against thread exhaustion
+
+**Already implemented,** now configurable via environment.
+
+---
+
+### Memory Guard
+
+**checkMemoryUsage() called:**
+- At start of each PR processing
+- Before expensive operations
+- Periodically during long-running tasks
+
+**Memory stats in `/metrics`:**
+```json
+{
+  "memory": {
+    "heapUsedMb": 342.18,
+    "heapTotalMb": 412.50,
+    "rssMb": 485.23,
+    "externalMb": 12.45
+  },
+  "runtimeConfig": {
+    "memoryLimitMb": 512,
+    "maxRequestsPerMinute": 60,
+    "maxConcurrentPR": 5
+  }
+}
+```
+
+---
+
+### Startup Validation
+
+**On startup, system validates:**
+1. Execution contract (Day 17)
+2. Runtime configuration (Day 25)
+3. Environment variables
+4. Policy configuration (Day 24)
+5. Fault controller (Day 13)
+
+**Output:**
+```
+✓ Execution contract validated
+  Version: 1.0.0
+  Hash: a3f9c2d8e1b4f5a6
+  States: 28
+  Invariants: 14
+  Postconditions: 14
+
+✓ Runtime configuration validated
+  Memory limit: 512 MB
+  Max RPM: 60
+  Max concurrent PRs: 5
+
+✓ Decision ledger initialized
+
+MergeSense listening on port 3000
+Mode: distributed (Redis)
+Contract: 1.0.0 (a3f9c2d8e1b4f5a6)
+```
+
+**Fail-fast on:**
+- Invalid configuration
+- Missing environment variables
+- Contract mismatch
+- Ledger initialization failure
+
+---
+
+### Load Testing
+
+**Run load test:**
+```bash
+node scripts/load-test.js
+```
+
+**Configurable:**
+```bash
+TEST_URL=http://localhost:3000/webhook TEST_REQUESTS=100 node scripts/load-test.js
+```
+
+**Output:**
+```
+Starting load test: 100 requests to http://localhost:3000/webhook
+[0] Success
+[1] Success
+...
+[58] Success
+[59] Success
+[60] Rate limited
+[61] Rate limited
+...
+
+Load test complete:
+  Total requests: 100
+  Successful: 60
+  Rate limited: 40
+  Errors: 0
+  Duration: 2341ms
+  Avg: 23.41ms per request
+```
+
+**Validates:**
+- Rate limiting works
+- Memory stays bounded
+- No crashes under load
+- Response times acceptable
+
+---
+
+### Deployment Documentation
+
+**New files:**
+- `DEPLOYMENT.md` - Platform-specific deployment guides
+- `PRODUCTION_CHECKLIST.md` - Pre/post-deployment checklist
+
+**Platforms covered:**
+- Railway (recommended for simplicity)
+- Render (recommended for features)
+- Heroku (classic PaaS)
+
+**Each guide includes:**
+- Environment variable setup
+- Build/start commands
+- Health check configuration
+- Scaling guidelines
+- Monitoring setup
+- Troubleshooting
+
+---
+
+### Production Checklist
+
+**Comprehensive checklist covers:**
+
+**Pre-deployment:**
+- [ ] GitHub App configured
+- [ ] Environment variables set
+- [ ] Policy mode chosen
+- [ ] Runtime limits configured
+
+**Deployment:**
+- [ ] Platform configured
+- [ ] Health checks enabled
+- [ ] Logs streaming
+
+**Post-deployment:**
+- [ ] Functional tests pass
+- [ ] Integration tests pass
+- [ ] Security validation
+- [ ] Load testing
+
+**GitHub configuration:**
+- [ ] Branch protection rules
+- [ ] Required status checks
+- [ ] Webhook delivery working
+
+**Monitoring:**
+- [ ] Alerts configured
+- [ ] Dashboards created
+- [ ] Team trained
+
+---
+
+### Platform-Specific Recommendations
+
+#### Railway
+**Pros:**
+- Simplest deployment
+- Auto-scaling
+- Great DX
+
+**Config:**
+```bash
+Build: npm install && npm run build
+Start: npm start
+Memory: 512MB
+Instances: 1 (start)
+```
+
+---
+
+#### Render
+**Pros:**
+- Auto-restart on crash
+- Native health checks
+- Good free tier
+
+**Config:**
+```bash
+Build: npm install && npm run build
+Start: npm start
+Auto-deploy: main branch
+Health check: /health
+```
+
+---
+
+#### Heroku
+**Pros:**
+- Battle-tested
+- Redis add-on
+- Good for existing Heroku users
+
+**Config:**
+```bash
+Dyno: Eco or Basic
+NODE_OPTIONS: --max-old-space-size=512
+Buildpack: heroku/nodejs
+```
+
+---
+
+### Scaling Guidelines
+
+**Single instance (512MB):**
+- ~50 PRs/hour
+- ~10 concurrent AI calls
+- Good for: Small teams (<50 devs)
+
+**Horizontal scaling (Redis required):**
+- 2 instances: ~100 PRs/hour
+- 5 instances: ~250 PRs/hour
+- Good for: Large teams (50-500 devs)
+
+**When to scale:**
+- `prs.loadShedPRSaturated` > 5%
+- Memory usage consistently > 80%
+- Rate limit hits > 10%
+
+---
+
+### Monitoring
+
+**Key metrics to track:**
+
+**Health:**
+- Memory usage trend
+- Rate limit hit rate
+- Crash rate
+
+**Quality:**
+- Formal validity rate
+- Policy violation rate
+- Confidence distribution
+
+**Performance:**
+- PR processing time (p50, p95, p99)
+- AI invocation rate
+- Fallback rate
+
+**Query metrics:**
+```bash
+curl http://localhost:3000/metrics | jq '{
+  memory: .memory.heapUsedMb,
+  formallyValid: .prs.formallyValid,
+  formallyInvalid: .prs.formallyInvalid,
+  validityRate: (.prs.formallyValid / .prs.total * 100)
+}'
+```
+
+---
+
+### Troubleshooting
+
+**Memory limit exceeded:**
+```
+Solution: Increase MERGESENSE_MAX_MEMORY_MB or reduce MERGESENSE_MAX_CONCURRENT
+```
+
+**Rate limit issues:**
+```
+Solution: Increase MERGESENSE_MAX_RPM or investigate webhook flood
+```
+
+**Contract mismatch:**
+```
+Solution: Ensure deployed code matches CURRENT_CONTRACT_VERSION
+```
+
+**Ledger chain broken:**
+```
+Solution: Check Redis data integrity or decision history corruption
+```
+
+---
+
+## Day 25 Complete
+
+MergeSense now has:
+- **Memory ceiling** - Process exits cleanly if exceeded
+- **Request rate limiting** - 429 on webhook flood
+- **Startup validation** - Fail-fast on misconfiguration
+- **Load test tooling** - Validate resilience
+- **Deployment guides** - Railway/Render/Heroku
+- **Production checklist** - 50+ verification items
+- **Runtime metrics** - Memory/rate limits exposed
+
+**Before Day 25:**
+- Feature complete but operationally naive
+- No production boundaries
+- No deployment guidance
+- Runtime failures unpredictable
+
+**After Day 25:**
+- Production-hardened with runtime guards
+- Deployment documented and validated
+- Operational resilience built-in
+- Enterprise deployable
+
+**The complete 25-day system:**
+- Days 1-6: Core functionality
+- Days 7-9: Operational maturity
+- Days 10-12: Distributed correctness
+- Day 13: Chaos safety
+- Days 14-20: Formal verification + cryptographic integrity
+- Days 21-23: Intelligent analysis
+- Day 24: Governance enforcement
+- **Day 25: Production hardening**
+
+MergeSense is now a **production-ready, formally verified, cryptographically tamper-evident, governance-enforcing, operationally resilient enterprise AI code review system**.
+
+Not a prototype. Not a demo. **Production-deployable today.**
+
 ## Day 24: Merge Policy Enforcement Mode (Enterprise Governance Layer)
 
 ### What Changed

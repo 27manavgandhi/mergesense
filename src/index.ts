@@ -21,6 +21,9 @@ import { generateMerkleProof } from './merkle/merkle-proof.js';
 import { verifyMerkleProofRequest } from './merkle/merkle-validator.js';
 import { MerkleTreeError } from './merkle/merkle-types.js';
 import type { MerkleVerificationRequest } from './merkle/merkle-types.js';
+import { RUNTIME_CONFIG } from './config/runtime-config.js';
+import { globalRateLimit } from './middleware/global-rate-limit.js';
+import { getMemoryUsage } from './observability/memory-monitor.js';
 
 dotenv.config();
 
@@ -217,6 +220,11 @@ app.get('/merkle/root', async (_req, res) => {
     });
   }
 });
+// Display runtime configuration
+console.log('✓ Runtime configuration validated');
+console.log(`  Memory limit: ${RUNTIME_CONFIG.memoryLimitMb} MB`);
+console.log(`  Max RPM: ${RUNTIME_CONFIG.maxRequestsPerMinute}`);
+console.log(`  Max concurrent PRs: ${RUNTIME_CONFIG.maxConcurrentPR}`);
 
 app.get('/merkle/proof/:reviewId', async (req, res) => {
   const { reviewId } = req.params;
@@ -295,6 +303,35 @@ app.get('/merkle/proof/:reviewId', async (req, res) => {
       error: 'Internal server error',
       reviewId,
     });
+  }
+});
+
+
+// Apply global rate limiting
+app.use(globalRateLimit);
+
+// ... (in /metrics endpoint, add memory stats:)
+
+app.get('/metrics', async (_req, res) => {
+  try {
+    const snapshot = await metrics.snapshot(prSemaphore, aiSemaphore, idempotencyGuard, redisEnabled);
+    const pricing = getPricingModel();
+    const limits = getConcurrencyLimits();
+    const memoryUsage = getMemoryUsage();
+    
+    res.status(200).json({
+      ...snapshot,
+      memory: memoryUsage,
+      runtimeConfig: RUNTIME_CONFIG,
+      pricing,
+      limits,
+      faults: {
+        enabled: faultController.isEnabled(),
+        config: faultController.isEnabled() ? faultController.getConfig() : null,
+      },
+    });
+  } catch (error) {
+    // ... existing error handling
   }
 });
 

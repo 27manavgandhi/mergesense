@@ -38,7 +38,7 @@ import { POLICY_CONFIG } from '../policy/policy-config.js';
 import { evaluateMergePolicy } from '../policy/policy-evaluator.js';
 import { handlePolicyStatus } from '../policy/status-publisher.js';
 import type { MergePolicyResult } from '../policy/policy-types.js';
-
+import { checkMemoryUsage } from '../observability/memory-monitor.js';
 
 import { 
   createDecisionTrace, 
@@ -436,7 +436,21 @@ export async function processPullRequest(
     });
     
 
-
+export async function processPullRequest(
+  context: PRContext, 
+  reviewId: string, 
+  idempotencyKey: string
+): Promise<void> {
+  const startTime = Date.now();
+  const injectedFaults: string[] = [];
+  const invariantViolations: InvariantViolation[] = [];
+  
+  // Memory safety check before expensive processing
+  checkMemoryUsage();
+  
+  // Initialize state machine
+  const stateMachine = new PipelineStateMachine(reviewId, 'RECEIVED');
+  
 
 
     const comment = formatReview(review, filterResult);
